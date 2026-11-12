@@ -262,10 +262,6 @@ target_include_directories(SurfaceLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(SurfaceLayoutTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME SurfaceLayoutTest COMMAND SurfaceLayoutTest)
 
-add_executable(MultiLayoutTest MultiLayoutTest.cpp)
-target_include_directories(MultiLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(MultiLayoutTest PRIVATE Qt6::Test Qt6::Core)
-add_test(NAME MultiLayoutTest COMMAND MultiLayoutTest)
 
 add_executable(FrameQueuePolicyTest FrameQueuePolicyTest.cpp)
 target_include_directories(FrameQueuePolicyTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -359,10 +355,6 @@ target_include_directories(RetainedMultiInputTest PRIVATE ${CMAKE_SOURCE_DIR}/se
 target_link_libraries(RetainedMultiInputTest PRIVATE Qt6::Test Qt6::Gui)
 add_test(NAME RetainedMultiInputTest COMMAND RetainedMultiInputTest)
 
-add_executable(TakeoverDetectorTest TakeoverDetectorTest.cpp)
-target_include_directories(TakeoverDetectorTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(TakeoverDetectorTest PRIVATE Qt6::Test Qt6::Core)
-add_test(NAME TakeoverDetectorTest COMMAND TakeoverDetectorTest)
 
 # The physical-console host reads logind asynchronously, but its adapter
 # selection is deliberately pure: test the greeter -> seat0-user handoff
@@ -537,14 +529,8 @@ if(TARGET krdp-console-worker)
         KRDP_SERVER_DIR="${CMAKE_SOURCE_DIR}/server"
         KRDP_E2E_CURSOR_CLIENT="$<TARGET_FILE:krdp-e2e-cursor-client>"
         KRDP_E2E_FAKE_LOCKER="$<TARGET_FILE:krdp-e2e-fake-locker>"
-        KRDP_E2E_FAILFILTER="$<TARGET_FILE:farside-failfilter>"
-        KRDP_E2E_SERVER="$<TARGET_FILE:krdpserver>")
-    add_dependencies(WorkerEndToEndTest krdp-console-worker krdp-e2e-cursor-client krdp-e2e-fake-locker farside-failfilter krdpserver)
-    # OPT-055 K4 user-server cases need the FreeRDP client probe; without it they skip.
-    if(TARGET krdpctl-probe)
-        target_compile_definitions(WorkerEndToEndTest PRIVATE KRDP_E2E_PROBE="$<TARGET_FILE:krdpctl-probe>")
-        add_dependencies(WorkerEndToEndTest krdpctl-probe)
-    endif()
+        KRDP_E2E_FAILFILTER="$<TARGET_FILE:farside-failfilter>")
+    add_dependencies(WorkerEndToEndTest krdp-console-worker krdp-e2e-cursor-client krdp-e2e-fake-locker farside-failfilter)
     add_test(NAME WorkerEndToEndTest COMMAND WorkerEndToEndTest)
     set_tests_properties(WorkerEndToEndTest PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
 endif()
@@ -624,17 +610,6 @@ target_include_directories(LayoutControlTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(LayoutControlTest PRIVATE Qt6::Test Qt6::Core)
 add_test(NAME LayoutControlTest COMMAND LayoutControlTest)
 
-# LayoutOwner is header-only (server/); ${CMAKE_BINARY_DIR}/src for krdp_export.h via LayoutControl.h.
-add_executable(LayoutOwnerTest LayoutOwnerTest.cpp)
-target_include_directories(LayoutOwnerTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server ${CMAKE_BINARY_DIR}/src)
-target_link_libraries(LayoutOwnerTest PRIVATE Qt6::Test Qt6::Core)
-add_test(NAME LayoutOwnerTest COMMAND LayoutOwnerTest)
-
-# LayoutSessionDiff is header-only (server/): the per-connection session diff a live KRDPCTL apply runs.
-add_executable(LayoutSessionDiffTest LayoutSessionDiffTest.cpp)
-target_include_directories(LayoutSessionDiffTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(LayoutSessionDiffTest PRIVATE Qt6::Test Qt6::Core)
-add_test(NAME LayoutSessionDiffTest COMMAND LayoutSessionDiffTest)
 
 # VideoCodecSupport.h uses the RDPGFX enums: FreeRDP headers only, nothing linked.
 # FreeRDP/WinPR dirs are SYSTEM (matching src/CMakeLists.txt's -isystem for the
@@ -724,11 +699,6 @@ if(TARGET krdpctl-probe)
     set_tests_properties(ClipboardStallLoopbackTest PROPERTIES TIMEOUT 180)
 endif()
 
-# AUD-S4: ListenAddress parsing (header-only, server/).
-add_executable(ListenAddressTest ListenAddressTest.cpp)
-target_include_directories(ListenAddressTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(ListenAddressTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
-add_test(NAME ListenAddressTest COMMAND ListenAddressTest)
 # --- end AUD-WS-S ---
 
 # --- AUD-WS-P ---
@@ -981,13 +951,6 @@ target_link_libraries(SystemdUnitPolicyTest PRIVATE Qt6::Test Qt6::Core)
 target_compile_definitions(SystemdUnitPolicyTest PRIVATE KRDP_UNIT_DIR="${CMAKE_BINARY_DIR}/server")
 add_test(NAME SystemdUnitPolicyTest COMMAND SystemdUnitPolicyTest)
 # F3: the Wayland globals probe behind the Plasma-by-default backend choice.
-if(BUILD_PLASMA_SESSION)
-    add_executable(PlasmaBackendProbeTest PlasmaBackendProbeTest.cpp ${CMAKE_SOURCE_DIR}/server/PlasmaBackendProbe.cpp)
-    target_include_directories(PlasmaBackendProbeTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-    target_link_libraries(PlasmaBackendProbeTest PRIVATE Qt6::Test Qt6::Gui Qt6::GuiPrivate Qt6::WaylandClient)
-    add_test(NAME PlasmaBackendProbeTest COMMAND PlasmaBackendProbeTest)
-    set_tests_properties(PlasmaBackendProbeTest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-endif()
 # F4: the console broker's refusal reaches a real libfreerdp client as 0x9.
 if(TARGET krdpctl-probe)
     add_executable(ConsoleRefusalLoopbackTest ConsoleRefusalLoopbackTest.cpp
@@ -1127,10 +1090,6 @@ foreach(name ClipboardFileQos DeliveryStats)
     set_tests_properties(${name}Test PROPERTIES TIMEOUT 120)
 endforeach()
 
-add_executable(FarsideMigrationTest FarsideMigrationTest.cpp)
-target_include_directories(FarsideMigrationTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
-target_link_libraries(FarsideMigrationTest PRIVATE Qt6::Test KRdpLegacyMigration)
-add_test(NAME FarsideMigrationTest COMMAND FarsideMigrationTest)
 
 # Shared broker preferences and the bounded, per-uid configuration reader.
 add_executable(DisplayWakePolicyTest DisplayWakePolicyTest.cpp)

@@ -790,7 +790,7 @@ bool PhysicalOutputGuard::restore()
         }
         if (!hasSnapshot()) {
             qCritical().noquote() << "Physical outputs are held but the snapshot is gone and" << stateFilePath() << "is unreadable; run:" << FallbackRecovery
-                                  << "(Steve's layout) or krdpserver --restore-outputs";
+                                  << "(Steve's layout)";
             Q_EMIT restored(false);
             return false;
         }
@@ -845,7 +845,7 @@ bool PhysicalOutputGuard::restore()
         why += u"; once reconnected run: kscreen-doctor "_s + restoreArgs(outcome.missing).join(u' ');
     }
     if (m_retrying) {
-        qCritical().noquote() << u"Physical outputs still not restored after the retry (%1). Run:"_s.arg(why) << recovery << "(or krdpserver --restore-outputs)";
+        qCritical().noquote() << u"Physical outputs still not restored after the retry (%1). Run:"_s.arg(why) << recovery;
         Q_EMIT restored(false);
     } else if (!m_retryTimer.isActive()) {
         qCritical().noquote() << u"Physical outputs NOT restored (%1); retrying in"_s.arg(why) << RestoreRetryMs << "ms. Manual recovery:" << recovery;

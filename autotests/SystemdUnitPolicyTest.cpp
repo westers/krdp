@@ -52,7 +52,6 @@ private Q_SLOTS:
     void restartsOnFailureWithALimit_data()
     {
         QTest::addColumn<QString>("unit");
-        QTest::newRow("user krdpserver") << unitPath("app-io.github.westers.farside.server.service");
         QTest::newRow("console host") << unitPath("krdp-console-host.service");
         QTest::newRow("virtual host") << unitPath("krdp-virtual-host.service");
     }
@@ -84,18 +83,17 @@ private Q_SLOTS:
         QVERIFY(!keys.contains(QStringLiteral("Service/StartLimitBurst")));
     }
 
-    // OPT-055 K6.1: the user server and the console host are watched; the virtual host is not yet
+    // OPT-055 K6.1: the console host is watched; the virtual host is not yet
     // (its unit runs under `env -i`, which strips NOTIFY_SOCKET; wave 2 X4).
-    void watchdogOnUserServerAndConsoleHostOnly_data()
+    void watchdogOnConsoleHostOnly_data()
     {
         QTest::addColumn<QString>("unit");
         QTest::addColumn<bool>("watched");
-        QTest::newRow("user farside-server") << unitPath("app-io.github.westers.farside.server.service") << true;
         QTest::newRow("console host") << unitPath("krdp-console-host.service") << true;
         QTest::newRow("virtual host") << unitPath("krdp-virtual-host.service") << false;
     }
 
-    void watchdogOnUserServerAndConsoleHostOnly()
+    void watchdogOnConsoleHostOnly()
     {
         QFETCH(QString, unit);
         QFETCH(bool, watched);

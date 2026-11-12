@@ -21,7 +21,7 @@ namespace KRdp
  * physical output, and remove their entry once the original state is back.
  * Whatever process finds an entry whose owner has died replays it: the next
  * console worker before it reports Ready (so broker start and worker exit
- * both lead to a replay), and krdpserver at start or `--restore-outputs`.
+ * both lead to a replay).
  *
  * File: `$XDG_STATE_HOME/farside/output-restore.json` of the desktop user
  * (`~/.local/state/farside/output-restore.json`), overridable with

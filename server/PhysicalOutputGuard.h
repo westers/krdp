@@ -22,9 +22,10 @@
  * shared output-restore journal (OutputRestoreJournal,
  * `$XDG_STATE_HOME/krdp/output-restore.json`, written atomically) just before
  * its first mutation, so the entry exists exactly while the physical outputs
- * are held; restoreFromStateFile() replays it after a crash (at server start
- * and via `krdpserver --restore-outputs`), together with any console worker
- * entries whose owner died.
+ * are held; restoreFromStateFile() replays it after a crash, together with any
+ * console worker entries whose owner died. (The legacy krdpserver that called it
+ * at start and via `--restore-outputs` was removed; the Console worker replays
+ * the whole journal itself before it reports Ready.)
  *
  * All calls are synchronous on the main thread (a kscreen-doctor run takes
  * well under a second); the only asynchronous part is the single retry a

@@ -3,7 +3,6 @@
 
 add_definitions(-DTRANSLATION_DOMAIN=\"farside-server\")
 
-add_executable(krdpserver)
 add_library(KRdpBrokerHostSettings STATIC BrokerHostSettings.cpp)
 set_target_properties(KRdpBrokerHostSettings PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(KRdpBrokerHostSettings PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src)
@@ -29,10 +28,6 @@ target_link_libraries(farside-authentication-helper PRIVATE KRdpBrokerAuthentica
 configure_file(org.farside.authentication.policy.in ${CMAKE_CURRENT_BINARY_DIR}/org.farside.authentication.policy @ONLY)
 install(TARGETS farside-authentication-helper DESTINATION ${KDE_INSTALL_LIBEXECDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.farside.authentication.policy DESTINATION ${KDE_INSTALL_DATADIR}/polkit-1/actions)
-add_library(KRdpLegacyMigration STATIC FarsideMigration.cpp)
-set_target_properties(KRdpLegacyMigration PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(KRdpLegacyMigration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(KRdpLegacyMigration PUBLIC Qt6::Core Qt6::DBus KF6::ConfigCore)
 # AUD-K3: certificate generation/renewal; also linked by the KCM to show the fingerprint.
 add_library(KRdpServerCertificate STATIC ServerCertificate.cpp)
 set_target_properties(KRdpServerCertificate PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -130,14 +125,8 @@ if (BUILD_PLASMA_SESSION)
     configure_file(org.kde.krdpvirtualprobe.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpvirtualprobe.desktop @ONLY)
 endif()
 
-target_sources(krdpserver PRIVATE main.cpp SessionController.cpp DisplayWakeGuard.cpp PhysicalOutputGuard.cpp OutputRestoreJournal.cpp HostLayoutExecutor.cpp ConsoleSeat.cpp ConsoleWorkerEndpoint.cpp ConsoleWorkerSession.cpp WorkerCodecBridge.cpp ConsoleHostController.cpp ConsoleWorkerLauncher.cpp)
-
-kconfig_target_kcfg_file(krdpserver FILE krdpserversettings.kcfg CLASS_NAME ServerConfig SINGLETON)
-
-target_include_directories(krdpserver PRIVATE ${CMAKE_BINARY_DIR})
 target_include_directories(krdp-audio-route-probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-target_link_libraries(krdpserver PRIVATE KRdpLegacyMigration KRdpServerCertificate Qt6::Gui Qt6::Network Qt6::DBus KF6::CoreAddons KF6::ConfigGui KF6::DBusAddons KF6::Crash KRdp qt6keychain KF6::StatusNotifierItem KF6::I18n KF6::GlobalAccel)
 target_link_libraries(krdp-console-host PRIVATE Qt6::Core Qt6::Gui Qt6::Network Qt6::DBus KRdp KRdpServerCertificate)
 target_link_libraries(krdp-console-probe PRIVATE Qt6::Core Qt6::DBus)
 target_link_libraries(krdp-greeter-probe PRIVATE Qt6::Core Qt6::Gui)
@@ -146,34 +135,24 @@ if (BUILD_PLASMA_SESSION)
     target_link_libraries(krdp-console-worker PRIVATE Qt6::Gui Qt6::Network Qt6::DBus KF6::GlobalAccel KRdp PkgConfig::PipeWire)
 endif()
 
-if (BUILD_PLASMA_SESSION)
-    target_compile_definitions(krdpserver PRIVATE -DWITH_PLASMA_SESSION)
-    target_sources(krdpserver PRIVATE PlasmaBackendProbe.cpp)
-    target_link_libraries(krdpserver PRIVATE Qt6::WaylandClient Qt6::GuiPrivate)
-endif()
-
-configure_file(org.kde.krdpserver.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.server.desktop @ONLY)
 configure_file(krdp-console-host.service.in ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service @ONLY)
 if (BUILD_PLASMA_SESSION)
     configure_file(org.kde.krdpconsoleworker.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.consoleworker.desktop @ONLY)
 endif()
-configure_file(app-org.kde.krdpserver.service.in ${CMAKE_CURRENT_BINARY_DIR}/app-io.github.westers.farside.server.service @ONLY)
 
 if(KRDP_BUILD_SYSTEM_PACKAGE)
-    set_target_properties(krdpserver PROPERTIES OUTPUT_NAME farside-server)
     foreach(helper console-host console-worker virtual-host virtual-session-entry virtual-pam-keeper
         virtual-session-cleanup virtual-device-entry virtual-guardian virtual-guardianctl)
         set_target_properties(krdp-${helper} PROPERTIES OUTPUT_NAME farside-${helper})
     endforeach()
 endif()
 
-foreach(target krdpserver krdp-console-host krdp-virtual-host krdp-virtual-rdp-host-probe)
+foreach(target krdp-console-host krdp-virtual-host krdp-virtual-rdp-host-probe)
     if(TARGET ${target})
         target_link_libraries(${target} PRIVATE KRdpBrokerUserSettings)
     endif()
 endforeach()
 
-install(TARGETS krdpserver DESTINATION ${KDE_INSTALL_BINDIR})
 install(TARGETS krdp-console-host DESTINATION ${KDE_INSTALL_BINDIR})
 if(KRDP_BUILD_CONSOLE_TEST_PACKAGE)
     install(TARGETS krdp-console-host RUNTIME DESTINATION ${KDE_INSTALL_BINDIR}
@@ -190,15 +169,12 @@ if (BUILD_PLASMA_SESSION)
             COMPONENT KRdpConsoleTest EXCLUDE_FROM_ALL)
     endif()
 endif()
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.server.desktop DESTINATION ${KDE_INSTALL_APPDIR})
 # KDE_INSTALL_SYSTEMDUNITDIR is lib/systemd; system units belong in its system/ subdirectory.
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/krdp-console-host.service DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/system RENAME farside-console-host.service)
 install(FILES console-host.conf.example virtual-host.conf.example virtual-session.conf.example DESTINATION ${KDE_INSTALL_DATADIR}/farside)
 if (BUILD_PLASMA_SESSION)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.westers.farside.consoleworker.desktop DESTINATION ${KDE_INSTALL_APPDIR})
 endif()
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/app-io.github.westers.farside.server.service DESTINATION ${KDE_INSTALL_SYSTEMDUSERUNITDIR})
-install(FILES 00-krdp.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/user-preset RENAME 00-farside.preset)
 
 # Explicit staging only. Default installs must not enable the unfinished root
 # virtual service. Policy/unit drafts go under share, never active configuration.
