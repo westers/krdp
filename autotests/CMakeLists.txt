@@ -670,6 +670,15 @@ if(TARGET krdpctl-probe)
     add_dependencies(RdpPreAuthLoopbackTest krdpctl-probe)
     add_test(NAME RdpPreAuthLoopbackTest COMMAND RdpPreAuthLoopbackTest)
     set_tests_properties(RdpPreAuthLoopbackTest PROPERTIES TIMEOUT 180)
+
+    add_executable(ServerConnectionAdmissionTest ServerConnectionAdmissionTest.cpp)
+    target_include_directories(ServerConnectionAdmissionTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/src)
+    target_include_directories(ServerConnectionAdmissionTest SYSTEM PRIVATE ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR})
+    target_link_libraries(ServerConnectionAdmissionTest PRIVATE Qt6::Test Qt6::Core Qt6::Network KRdp)
+    target_compile_definitions(ServerConnectionAdmissionTest PRIVATE KRDPCTL_PROBE="$<TARGET_FILE:krdpctl-probe>")
+    add_dependencies(ServerConnectionAdmissionTest krdpctl-probe)
+    add_test(NAME ServerConnectionAdmissionTest COMMAND ServerConnectionAdmissionTest)
+    set_tests_properties(ServerConnectionAdmissionTest PROPERTIES TIMEOUT 180)
 endif()
 
 # AUD-FIX4 D1: the in-flight window on a throttled and then blocked link, end to end.
@@ -1234,6 +1243,13 @@ add_executable(GameInputTest GameInputTest.cpp)
 target_include_directories(GameInputTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(GameInputTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME GameInputTest COMMAND GameInputTest)
+
+# REVIEW-S1: unauthenticated-connection caps and failed-login backoff.
+add_executable(ConnectionAdmissionTest ConnectionAdmissionTest.cpp)
+target_include_directories(ConnectionAdmissionTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ConnectionAdmissionTest PRIVATE Qt6::Test Qt6::Core Qt6::Network)
+add_test(NAME ConnectionAdmissionTest COMMAND ConnectionAdmissionTest)
+set_tests_properties(ConnectionAdmissionTest PROPERTIES TIMEOUT 60)
 
 # OPT-055 K3 / T-R5: accept-error (EMFILE) recovery and bounded Server teardown.
 add_executable(ServerAcceptRecoveryTest ServerAcceptRecoveryTest.cpp)

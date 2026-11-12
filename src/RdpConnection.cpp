@@ -1873,6 +1873,10 @@ bool RdpConnection::onPostConnect()
         authenticated = true;
     }
 
+    // REVIEW-S1: feeds the per-source failure backoff and frees the connection's
+    // slot in the unauthenticated-connection cap.
+    d->server->recordLoginResult(this, authenticated);
+
     // Devices (RDPSND, AUDIN, RDPECAM) are created by the session loop's
     // reconcilers, and only once a consent exists: a KRDPCTL `device` record
     // or StandardClientMedia, both after this authentication. That is past
@@ -1882,7 +1886,8 @@ bool RdpConnection::onPostConnect()
         // A standard reason every RDP client understands, instead of a bare drop that FreeRDP
         // reports as a logoff: Close() sends Deactivate All, the Set Error Info PDU and the
         // Disconnect Provider Ultimatum before PostConnect fails the state machine.
-        qCInfo(KRDP) << "Authentication failed for user" << username << "- telling the client (ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES)";
+        qCInfo(KRDP) << "Authentication failed for user" << username << "from" << d->server->peerAddress(this)
+                     << "- telling the client (ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES)";
         close(CloseReason::AuthenticationFailed);
         return false;
     }
