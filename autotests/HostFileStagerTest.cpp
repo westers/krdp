@@ -191,6 +191,107 @@ private Q_SLOTS:
         QCOMPARE(rig.notes.size(), 1);
     }
 
+    // REVIEW-S5 (spec 3.2 d): an owner expires its own transfers after 24 h; the sweep at open ran once, so a long-lived worker kept them.
+    void aFinishedCopyOlderThanADayIsRemovedAndWithdrawnFromTheClipboard()
+    {
+        Rig rig(true, false);
+        qint64 offset = 0;
+        rig.tuning.nowSeconds = [&offset] { return qint64(::time(nullptr)) + offset; };
+        rig.tuning.expiryCheckIntervalMs = 0; // by hand here
+        rig.start();
+        rig.offer(1, descriptorOf({{u"a.txt"_s, false, 5, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        rig.data(1, 0, 0, QByteArray("hello"));
+        QTRY_COMPARE(rig.lastState().phase, FilePushPhase::Done);
+        QCOMPARE(rig.uriWrites.size(), 1);
+        const QString dir = rig.transferDir(1);
+        QVERIFY(QFileInfo::exists(dir + u"/a.txt"_s));
+        const int recordsBefore = rig.records.size();
+        offset = ClipboardFileStaging::MaxAgeSeconds; // exactly a day is not older than a day
+        QCOMPARE(rig.stager->expireOldTransfers(), 0);
+        QCOMPARE(rig.stager->transferCount(), 1);
+        QCOMPARE(rig.clears, 0);
+        offset = ClipboardFileStaging::MaxAgeSeconds + 1;
+        QCOMPARE(rig.stager->expireOldTransfers(), 1);
+        QCOMPARE(rig.stager->transferCount(), 0);
+        QCOMPARE(rig.clears, 1); // the host clipboard is told to let go of the list it still owned
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QVERIFY(!QFileInfo::exists(dir));
+        QVERIFY(QFileInfo::exists(rig.instanceDir())); // the instance itself stays for the next copy
+        QCOMPARE(rig.records.size(), recordsBefore); // a finished copy ends silently: the broker already has its Done
+        // the next copy works as before
+        rig.offer(2, descriptorOf({{u"b.txt"_s, false, 3, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 2);
+        QVERIFY(rig.replies().last().accepted);
+    }
+    void theExpiryRunsOnItsOwnTimerNotOnlyAtANewOffer()
+    {
+        Rig rig(true, false);
+        qint64 offset = 0;
+        rig.tuning.nowSeconds = [&offset] { return qint64(::time(nullptr)) + offset; };
+        rig.tuning.expiryCheckIntervalMs = 40;
+        rig.start();
+        rig.offer(1, descriptorOf({{u"a.txt"_s, false, 5, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        rig.data(1, 0, 0, QByteArray("hello"));
+        QTRY_COMPARE(rig.lastState().phase, FilePushPhase::Done);
+        QTest::qWait(150); // several ticks, all of them too early
+        QCOMPARE(rig.stager->transferCount(), 1);
+        offset = ClipboardFileStaging::MaxAgeSeconds + 60;
+        QTRY_COMPARE(rig.stager->transferCount(), 0);
+        QCOMPARE(rig.clears, 1);
+        QTRY_VERIFY(!QFileInfo::exists(rig.transferDir(1)));
+    }
+    void aTransferStillReceivingAfterADayIsEndedAsCancelled()
+    {
+        Rig rig(true, false);
+        qint64 offset = 0;
+        rig.tuning.nowSeconds = [&offset] { return qint64(::time(nullptr)) + offset; };
+        rig.tuning.expiryCheckIntervalMs = 0;
+        rig.start();
+        rig.offer(1, descriptorOf({{u"a.txt"_s, false, 4, std::nullopt}, {u"b.txt"_s, false, 4, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        rig.data(1, 0, 0, QByteArray("abcd"));
+        QTRY_COMPARE(rig.acks().size(), 1);
+        const QString dir = rig.transferDir(1);
+        offset = ClipboardFileStaging::MaxAgeSeconds + 1;
+        const int notes = rig.notes.size();
+        QCOMPARE(rig.stager->expireOldTransfers(), 1);
+        QCOMPARE(rig.lastState().phase, FilePushPhase::Failed);
+        QCOMPARE(rig.lastState().reason, FilePushReason::Cancelled);
+        QCOMPARE(rig.notes.size(), notes); // no alarm for a copy nobody finished in a day
+        QVERIFY(rig.uriWrites.isEmpty());
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QVERIFY(!QFileInfo::exists(dir));
+        // a late chunk of that copy is answered Gone
+        rig.data(1, 1, 0, QByteArray("efgh"));
+        QTRY_COMPARE(int(rig.acks().last().status), int(AckStatus::Gone));
+    }
+    // a new offer also runs the expiry (the offers of a long-lived worker are its other chance), and removes what the file system says is old
+    void aNewOfferExpiresWhatIsOldAndSweepsOrphans()
+    {
+        Rig rig(true, false);
+        qint64 offset = 0;
+        rig.tuning.nowSeconds = [&offset] { return qint64(::time(nullptr)) + offset; };
+        rig.tuning.expiryCheckIntervalMs = 0;
+        rig.start();
+        rig.offer(1, descriptorOf({{u"a.txt"_s, false, 1, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 1);
+        // an orphan a failed removal could have left: an old transfer directory nobody knows
+        const QString orphan = rig.instanceDir() + u"/77"_s;
+        QVERIFY(QDir().mkpath(orphan + u"/x"_s));
+        const struct timespec old[2] = {{time(nullptr) - 2 * ClipboardFileStaging::MaxAgeSeconds, 0}, {time(nullptr) - 2 * ClipboardFileStaging::MaxAgeSeconds, 0}};
+        QCOMPARE(::utimensat(AT_FDCWD, QFile::encodeName(orphan).constData(), old, 0), 0);
+        offset = 3 * ClipboardFileStaging::MaxAgeSeconds;
+        rig.offer(2, descriptorOf({{u"b.txt"_s, false, 1, std::nullopt}}));
+        QTRY_COMPARE(rig.replies().size(), 2);
+        QVERIFY(rig.replies().last().accepted);
+        QVERIFY(rig.stager->waitForIdle(5000));
+        QVERIFY(!QFileInfo::exists(orphan));
+        QVERIFY(!QFileInfo::exists(rig.transferDir(1)));
+        QVERIFY(QFileInfo::exists(rig.transferDir(2)));
+    }
+
     void policyGateRefusesWithoutTheFlag()
     {
         Rig rig;
