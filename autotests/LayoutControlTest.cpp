@@ -113,7 +113,8 @@ private Q_SLOTS:
         QVERIFY(!capabilitiesRecord(caps).contains(QStringLiteral("clipboard")));
         caps.clipboard = ClipboardCapabilities{true, false, 1024 * 1024};
         QCOMPARE(capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject(),
-                 (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), false}, {QStringLiteral("maxBytes"), 1024 * 1024}}));
+                 (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), false}, {QStringLiteral("maxBytes"), 1024 * 1024},
+                              {QStringLiteral("clearedNotice"), true}})); // GAP-G1: the private `clipboard-cleared` notice is sent
         // Every other group is unchanged by it.
         ChannelCapabilities plain;
         plain.host = QStringLiteral("console");
@@ -130,7 +131,7 @@ private Q_SLOTS:
         caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, true, 16 * 1024 * 1024};
         QCOMPARE(capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject(),
                  (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), true}, {QStringLiteral("maxBytes"), 1024 * 1024},
-                              {QStringLiteral("images"), true}, {QStringLiteral("maxImageBytes"), 16 * 1024 * 1024}}));
+                              {QStringLiteral("images"), true}, {QStringLiteral("maxImageBytes"), 16 * 1024 * 1024}, {QStringLiteral("clearedNotice"), true}}));
         // images=false (the default) adds no key: the text-only group is byte-for-byte what OPT-067 sent.
         caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, false, 16 * 1024 * 1024};
         QVERIFY(!capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject().contains(QStringLiteral("images")));
@@ -146,7 +147,7 @@ private Q_SLOTS:
         QCOMPARE(capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject(),
                  (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), true}, {QStringLiteral("maxBytes"), 1024 * 1024},
                               {QStringLiteral("images"), true}, {QStringLiteral("maxImageBytes"), 16 * 1024 * 1024},
-                              {QStringLiteral("html"), true}, {QStringLiteral("maxHtmlBytes"), 8 * 1024 * 1024}}));
+                              {QStringLiteral("html"), true}, {QStringLiteral("maxHtmlBytes"), 8 * 1024 * 1024}, {QStringLiteral("clearedNotice"), true}}));
         // html=false (the default) adds no key: the group is byte-for-byte what OPT-072 sent.
         caps.clipboard = ClipboardCapabilities{true, true, 1024 * 1024, true, 16 * 1024 * 1024};
         const auto group = capabilitiesRecord(caps).value(QStringLiteral("clipboard")).toObject();
@@ -169,7 +170,9 @@ private Q_SLOTS:
                  (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), false}, {QStringLiteral("maxMode"), QStringLiteral("auto")},
                               {QStringLiteral("huge"), true}, {QStringLiteral("transfer"), true},
                               // OPT-078 small files: the in-flight window this host serves and requests under (additive)
-                              {QStringLiteral("window"), QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 128}}}}));
+                              {QStringLiteral("window"), QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 128}}},
+                              // GAP-G3: the host never offers the client's staged files back (additive)
+                              {QStringLiteral("hostNeverEchoes"), true}}));
         // the rest of the group is what OPT-077 sent
         group.remove(QStringLiteral("files"));
         caps.clipboard->files.reset();

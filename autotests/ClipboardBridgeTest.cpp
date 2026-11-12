@@ -341,6 +341,150 @@ private Q_SLOTS:
         QVERIFY(rig.sent.formatLists.isEmpty());
     }
 
+    // ---- GAP-G1: the host's clipboard no longer holds what was announced ----
+    void withdrawHostOfferTakesBackAnAnnouncementWithOneEmptyFormatList_data()
+    {
+        QTest::addColumn<bool>("text");
+        QTest::addColumn<bool>("image");
+        QTest::addColumn<bool>("html");
+        QTest::newRow("text") << true << false << false;
+        QTest::newRow("image") << false << true << false;
+        QTest::newRow("html with its text") << true << false << true;
+        QTest::newRow("text and image") << true << true << false;
+    }
+    void withdrawHostOfferTakesBackAnAnnouncementWithOneEmptyFormatList()
+    {
+        QFETCH(bool, text);
+        QFETCH(bool, image);
+        QFETCH(bool, html);
+        Rig rig;
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHost(text, image, html);
+        QCOMPARE(rig.sent.formatLists.size(), 1);
+        QVERIFY(!rig.sent.formatLists.last().isEmpty());
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+        QVERIFY(rig.sent.formatLists.last().isEmpty()); // zero formats: "the clipboard is empty"
+        rig.clipboard.withdrawHostOffer(); // once
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+        // a paste of the old announcement gets nothing
+        rig.clientDataRequest();
+        QTRY_COMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+    }
+
+    void withdrawHostOfferSendsNothingWhenNothingWasAnnounced()
+    {
+        Rig rig;
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.withdrawHostOffer();
+        QVERIFY(rig.sent.formatLists.isEmpty());
+        // an announcement that was dropped before it reached the client (the picture was not delivered yet) is nothing to take back
+        Rig early;
+        early.clipboard.announceHostText();
+        early.clipboard.withdrawHostOffer();
+        early.clipboard.setGraphicsDelivered();
+        QTest::qWait(30);
+        QVERIFY(early.sent.formatLists.isEmpty());
+    }
+
+    // MS-RDPECLIP: the client's own Format List made it the clipboard owner; an empty list after that would empty the client's own copy.
+    void withdrawHostOfferSendsNothingAfterTheClientCopiedItself()
+    {
+        Rig rig;
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHostText();
+        QCOMPARE(rig.sent.formatLists.size(), 1);
+        rig.clientFormatList({CF_UNICODETEXT}); // the client copied: it owns the clipboard now
+        QTRY_COMPARE(rig.sent.formatListResponses, 1); // (the list is handled on the main thread, queued)
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(rig.sent.formatLists.size(), 1);
+        // a new host copy is announced and withdrawn normally again
+        rig.clipboard.announceHostText();
+        QTRY_COMPARE(rig.sent.formatLists.size(), 2);
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(rig.sent.formatLists.size(), 3);
+        QVERIFY(rig.sent.formatLists.last().isEmpty());
+    }
+
+    // GAP-G1 (KRDPCTL): the same moments also send the private `clipboard-cleared` notice to our own client. `offers` is the number of
+    // NON-EMPTY Format Lists sent to this client so far, up to and including the offer being cleared (the empty list does not count).
+    void aClearedOfferIsAlsoNoticedOnKrdpctlWithTheCountOfNonEmptyLists()
+    {
+        Rig rig;
+        QList<QJsonObject> notices;
+        rig.clipboard.setNoticeSinkForTest([&notices](const QJsonObject &record) { notices.append(record); });
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHostText(); // non-empty list 1
+        QCOMPARE(rig.sent.formatLists.size(), 1);
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(rig.sent.formatLists.size(), 2); // the empty list (not counted)
+        QCOMPARE(notices.size(), 1);
+        QCOMPARE(notices.last(), (QJsonObject{{QStringLiteral("type"), QStringLiteral("clipboard-cleared")}, {QStringLiteral("v"), 1}, {QStringLiteral("offers"), 1}}));
+        // two more non-empty lists (the second waits for the announce interval), then a clear: offers = 3
+        rig.clipboard.announceHost(true, false);
+        QTRY_COMPARE(rig.sent.formatLists.size(), 3);
+        rig.clipboard.announceHost(false, true);
+        QTRY_COMPARE(rig.sent.formatLists.size(), 4);
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(notices.size(), 2);
+        QCOMPARE(notices.last().value(QStringLiteral("offers")).toInt(), 3);
+        // a newer offer after the first notice leaves that notice carrying its OLD count (the client ignores it by that number)
+        QCOMPARE(notices.first().value(QStringLiteral("offers")).toInt(), 1);
+        rig.clipboard.announceHostText();
+        QTRY_COMPARE(rig.sent.formatLists.size(), 6);
+        QCOMPARE(notices.size(), 2); // announcing sends no notice
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(notices.last().value(QStringLiteral("offers")).toInt(), 4);
+        // a second withdrawal sends nothing
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(notices.size(), 3);
+    }
+
+    void noClearedNoticeWhenNothingWasAnnouncedOrTheClientCopiedSince()
+    {
+        Rig rig;
+        QList<QJsonObject> notices;
+        rig.clipboard.setNoticeSinkForTest([&notices](const QJsonObject &record) { notices.append(record); });
+        rig.clipboard.withdrawHostOffer(); // nothing announced
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.withdrawHostOffer();
+        rig.clipboard.announceHostText();
+        rig.clientFormatList({CF_UNICODETEXT}); // the client copied: it owns the clipboard
+        QTRY_COMPARE(rig.sent.formatListResponses, 1);
+        rig.clipboard.withdrawHostOffer();
+        QVERIFY(notices.isEmpty());
+        // an announcement held back before the picture was delivered is not cleared either
+        Rig early;
+        QList<QJsonObject> earlyNotices;
+        early.clipboard.setNoticeSinkForTest([&earlyNotices](const QJsonObject &record) { earlyNotices.append(record); });
+        early.clipboard.announceHostText();
+        early.clipboard.withdrawHostOffer();
+        QVERIFY(earlyNotices.isEmpty());
+        // a connection without KRDPCTL (stock client: no sink, no control channel) just gets the standard list and no failure
+        Rig stock;
+        stock.clipboard.setGraphicsDelivered();
+        stock.clipboard.announceHostText();
+        stock.clipboard.withdrawHostOffer();
+        QCOMPARE(stock.sent.formatLists.size(), 2);
+        QVERIFY(stock.sent.formatLists.last().isEmpty());
+    }
+
+    void withdrawHostOfferFailsAPasteThatIsWaitingForTheHost()
+    {
+        Rig rig;
+        QSignalSpy requested(&rig.clipboard, &Clipboard::hostTextRequested);
+        rig.clipboard.setGraphicsDelivered();
+        rig.clipboard.announceHostText();
+        rig.clientDataRequest();
+        QTRY_COMPARE(requested.size(), 1);
+        rig.clipboard.withdrawHostOffer();
+        QCOMPARE(rig.sent.dataResponses.size(), 1);
+        QCOMPARE(rig.sent.dataResponses.last().flags, uint16_t(CB_RESPONSE_FAIL));
+        rig.clipboard.provideHostText(requested.first().first().toULongLong(), Canary, true); // the late answer is dropped
+        QCOMPARE(rig.sent.dataResponses.size(), 1);
+    }
+
     // ---- client to host ----
     void aClientCopyIsRequestedAndPassedOn()
     {

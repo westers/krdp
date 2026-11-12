@@ -159,6 +159,12 @@ public:
     Q_SIGNAL void hostFileTransferEnded(quint64 seq, int reason, int cause);
     /** The answer to hostTextRequested(\a requestId): \a text (host LF) when \a ok, a refusal otherwise. */
     void provideHostText(quint64 requestId, const QString &text, bool ok);
+    /**
+     * GAP-G1: the host clipboard changed to something this server does not offer (emptied, the client's own staged files, a suppressed or
+     * expired copy). When an announcement of the host is standing at the client (nothing of the client's own copy since), an empty Format
+     * List (MS-RDPECLIP 2.2.3.1, zero formats: "the clipboard is empty") takes it back, once; with nothing announced nothing is sent.
+     */
+    void withdrawHostOffer();
     /** Forget the host side: withdraw an announcement, fail a pending request. Handover, control change, denial. */
     void resetHostSide();
     /** Forget a half-received client copy and any request on the wire. */

@@ -486,6 +486,11 @@ bool VirtualSessionTransport::activateBinding(const VirtualSessionRegistry::Hand
         if (alive && m_connection && !reply.isEmpty()) sendReply(reply);
     }));
     m_workerConnections.append(connect(endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64, quint8 flags) {
+        if (!flags) {
+            // GAP-G1 (wire 23): the host clipboard holds nothing offered any more; take back what was announced (nothing announced: nothing sent).
+            if (m_connection && m_connection->clipboard()) m_connection->clipboard()->withdrawHostOffer();
+            return;
+        }
         if (m_connection && m_connection->clipboard() && m_clipboardPlan && m_clipboardPlan->hostToClient && authorized(m_clipboardUid))
         {
             const bool files = flags & ConsoleWorkerWire::ClipboardOfferFiles;

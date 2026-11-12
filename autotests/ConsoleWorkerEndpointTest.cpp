@@ -530,6 +530,12 @@ void ConsoleWorkerEndpointTest::clipboardCrossesOnlyAfterReadyAndOnlyWhenAllowed
     w.worker.flush();
     QTest::qWait(60);
     QCOMPARE(offered.size(), 1); // denied: never forwarded
+    // GAP-G1 (wire 23): "nothing is offered any more" (flags 0) grants nothing and is forwarded whatever the policy says.
+    w.worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{7, 0}));
+    w.worker.flush();
+    QTRY_COMPARE(offered.size(), 2);
+    QCOMPARE(offered.last().first().toULongLong(), quint64(7));
+    QCOMPARE(offered.last().at(1).value<quint8>(), quint8(0));
     QCOMPARE(w.endpoint.requestClipboard(), quint64(0)); // and nothing is requested
     QVERIFY(w.endpoint.ready());
 }

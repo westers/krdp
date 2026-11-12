@@ -106,6 +106,28 @@ private Q_SLOTS:
         QCOMPARE(run.ended, 0);
     }
 
+    // GAP-G1: the host's offer is withdrawn (an empty Format List goes out). libfreerdp's cliprdr client does not surface an empty server list
+    // (FreeRDP issue 13494), so this checks only what a stock client can be held to: the zero-format PDU is accepted on the wire without
+    // dropping the connection, and a later host copy is announced and served normally.
+    void aWithdrawnOfferLeavesTheConnectionAndALaterCopyWorking()
+    {
+        const QString src = fresh("src2w");
+        const QString out = fresh("out2w");
+        writeFile(src + u"/later.txt"_s, "a later copy");
+        Run run;
+        QVERIFY(begin(run, {native(src + u"/later.txt"_s)}, {u"--files-out"_s, out}));
+        QVERIFY(run.announceFiles());
+        run.wait(800ms); // announced; the probe runs --silent, so its format-list lines are not in the log
+        run.board->withdrawHostOffer(); // sends the Format List PDU with zero formats
+        run.wait(700ms);
+        QCOMPARE(run.probe.state(), QProcess::Running);
+        QVERIFY(run.board->hostFilesAllowed());
+        run.offerSeq = 2;
+        run.board->announceHost(false, false, false, true);
+        QVERIFY2(run.waitFor(30s, [&run] { return run.log.contains("FILES done"); }), run.log.constData());
+        QCOMPARE(readAt(out + u"/later.txt"_s, 0, 100), QByteArray("a later copy"));
+    }
+
     void cancelInTheMiddleStopsTheReads()
     {
         const QString src = fresh("src3");

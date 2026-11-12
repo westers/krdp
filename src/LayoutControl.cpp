@@ -491,6 +491,9 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
         QJsonObject group{{QStringLiteral("hostToClient"), clipboard->hostToClient},
                           {QStringLiteral("clientToHost"), clipboard->clientToHost},
                           {QStringLiteral("maxBytes"), clipboard->maxBytes}};
+        // GAP-G1 (additive): this host sends the private `clipboard-cleared` notice (beside the standard empty Format List) whenever the host's
+        // offer is taken back. Capabilities only reach a client that negotiated KRDPCTL, which is the only client the notice goes to.
+        group.insert(QStringLiteral("clearedNotice"), true);
         if (clipboard->images) {
             group.insert(QStringLiteral("images"), true);
             group.insert(QStringLiteral("maxImageBytes"), clipboard->maxImageBytes);
@@ -510,6 +513,9 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
             filesGroup.insert(QStringLiteral("window"),
                               QJsonObject{{QStringLiteral("maxBytes"), qint64(ClipboardFileLimits::NegotiatedWindow.maxBytes)},
                                           {QStringLiteral("maxCount"), ClipboardFileLimits::NegotiatedWindow.maxCount}});
+            // GAP-G3 (additive): this server never offers the client's own staged files back to it, by path, in every format and whatever the file
+            // policy says (the guard on the staging root is unconditional), so a client needs no echo heuristic of its own.
+            filesGroup.insert(QStringLiteral("hostNeverEchoes"), true);
             group.insert(QStringLiteral("files"), filesGroup);
         }
         record.insert(QStringLiteral("clipboard"), group);

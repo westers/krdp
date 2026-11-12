@@ -39,7 +39,8 @@ inline const QLoggingCategory &hostClipboardLog()
  * is the only code that touches it, through a small Backend so the logic is tested without a compositor.
  *
  *  - A host copy is coalesced (SettleMs) into one ClipboardOffer{seq}: no contents, none when the policy
- *    does not allow host to client or when the host has no text.
+ *    does not allow host to client or when the host has no text. GAP-G1 (wire 23): when the host clipboard changes to something that is
+ *    not offered while an offer stands, one ClipboardOffer with flags 0 says so (not for the echo of the client's own text or picture).
  *  - The text is read only when the client pastes (a ClipboardRequest), normalised to LF, without NULs,
  *    and refused when it exceeds the cap.
  *  - A ClipboardSet is written only when mayApplyClipboardSet() holds. Writes made on the login screen or
@@ -128,11 +129,13 @@ public:
         if (policy.revision <= m_policy.revision) {
             return; // stale
         }
+        const bool couldOffer = ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop);
         m_policy = policy;
         m_files.setPolicy(policy);
         m_stager.setPolicy(policy);
         if (!ConsoleWorkerWire::mayOfferClipboard(m_policy, m_desktop)) {
             m_settle.stop();
+            if (couldOffer) tellCleared(); // GAP-G1: host to client went off (a lock, the setting): what the client was told about is no longer offered
         }
     }
 
@@ -235,9 +238,13 @@ private:
         };
         backend.clearUriList = [this] {
             if (m_backend.clearUriList) {
+                // GAP-G1: when the host's selection was our staged list (a copy that ended, or the 24 h expiry), clearing it empties the host
+                // clipboard; the clipboard's own change signal is ignored while this writes, so what the client was told is withdrawn here.
+                const bool owned = m_backend.ownsUriList && m_backend.ownsUriList();
                 m_writing = true;
                 m_backend.clearUriList();
                 m_writing = false;
+                if (owned) withdrawOffer();
             }
         };
         backend.notify = [this](const QString &summary, const QString &body) {
@@ -263,7 +270,7 @@ private:
         // (and reading our own selection would ask this thread to serve itself): never offered back to the client.
         if (m_backend.ownsUriList && m_backend.ownsUriList()) {
             qCDebug(hostClipboardLog) << "host clipboard changed: our own staged files coming back, not offered";
-            withdrawFileOffer();
+            withdrawOffer();
             return;
         }
         // OPT-078 echo guard: files in our own staging folder are the client's files, whoever owns the clipboard now (a clipboard manager or
@@ -286,7 +293,7 @@ private:
                 // All ours, or files are not offered at all here: nothing of this selection goes to the client (a mixed list is offered as files,
                 // below, only the part that is not staged, and only when the file policy allows it).
                 if (paths.isEmpty() || !m_policy.filesHostToClient) {
-                    withdrawFileOffer();
+                    withdrawOffer();
                     return;
                 }
             }
@@ -299,6 +306,7 @@ private:
             m_files.registerOffer(m_offerSeq, paths);
             // Counts only (OPT-078): never a path.
             qInfo().nospace() << "Clipboard: host copied files items=" << paths.size() << " refused=" << refused;
+            m_standing = true;
             m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, ConsoleWorkerWire::ClipboardOfferFiles}));
             return;
         }
@@ -306,7 +314,7 @@ private:
         const bool hasImage = m_backend.hasImage && m_backend.hasImage();
         const bool hasHtml = m_backend.hasHtml && m_backend.readHtml && m_backend.hasHtml();
         if (!hasText && !hasImage && !hasHtml) {
-            withdrawFileOffer(); // the host's selection holds nothing we offer: an earlier file offer is stale
+            withdrawOffer(); // the host's selection holds nothing we offer: an earlier file offer is stale
             return;
         }
         // OPT-077: formats from which formats exist (never their contents): rich HTML goes with its text and drops a picture;
@@ -317,7 +325,7 @@ private:
         if (choice.image) flags |= ConsoleWorkerWire::ClipboardOfferImage;
         if (choice.html) flags |= ConsoleWorkerWire::ClipboardOfferHtml;
         if (!flags) {
-            withdrawFileOffer();
+            withdrawOffer();
             return;
         }
         // Only just after a write of ours is the content read, to tell an asynchronous echo from a new copy.
@@ -336,28 +344,48 @@ private:
             flags &= ~ConsoleWorkerWire::ClipboardOfferImage;
         }
         if (!flags) {
+            // The client's own text/image/HTML written by us, coming back: the client owns the clipboard, so nothing is announced and nothing is
+            // withdrawn from it (GAP-G1: no "cleared" for an echo). The file offer of an earlier host copy is still stale here.
             qCDebug(hostClipboardLog) << "host clipboard changed: our own write coming back, not offered";
-            withdrawFileOffer();
+            withdrawFileService();
             return;
         }
         qCDebug(hostClipboardLog) << "host clipboard changed: offering to the client, text" << bool(flags & ConsoleWorkerWire::ClipboardOfferText) << "html" << bool(flags & ConsoleWorkerWire::ClipboardOfferHtml)
                                   << "image" << bool(flags & ConsoleWorkerWire::ClipboardOfferImage) << "offer" << (m_offerSeq + 1);
         m_files.registerOffer(++m_offerSeq, {}); // the files of an earlier copy are no longer the current offer (a lock may keep them)
+        m_standing = true;
         m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, flags}));
     }
 
     /**
      * The host's selection changed to something that is not announced (the client's own staged files, our own write coming back, nothing we
      * offer): a file offer still standing from an earlier host copy no longer describes the clipboard, so a paste of it must not be served.
-     * The offer is replaced by an empty one, exactly as a text copy replaces it. The client is not told (a ClipboardOffer without a format is
-     * not a valid record of the wire, which stays at 22): its next paste of the stale files is answered Gone, and it forgets them at its
-     * next announcement.
+     * The offer is replaced by an empty one, exactly as a text copy replaces it, and (wire 23, GAP-G1) the broker is told with a
+     * ClipboardOffer of flags 0 when an offer of any kind was standing, so the client stops listing what is gone. A paste that was already
+     * on its way is answered Gone.
      */
-    void withdrawFileOffer()
+    void withdrawOffer()
+    {
+        withdrawFileService();
+        tellCleared();
+    }
+
+    /// The file service forgets a standing file offer (a paste of it is answered Gone); the client is not told here.
+    void withdrawFileService()
     {
         if (!m_files.currentOfferHasFiles()) return;
         qCDebug(hostClipboardLog) << "host clipboard changed: the earlier file offer" << m_offerSeq << "is withdrawn";
         m_files.registerOffer(++m_offerSeq, {});
+    }
+
+    /// GAP-G1 (wire 23): tell the broker that nothing is offered any more (a ClipboardOffer with flags 0), once per standing offer: the broker
+    /// answers the client with an empty format list when it had announced something, so the client stops listing what is gone.
+    void tellCleared()
+    {
+        if (!m_standing) return;
+        m_standing = false;
+        qCDebug(hostClipboardLog) << "host clipboard holds nothing offered any more: telling the broker, offer" << (m_offerSeq + 1);
+        m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{++m_offerSeq, 0}));
     }
 
     /// The host copy is our own write coming back when it holds the same pixels. The bytes can differ: KSystemClipboard
@@ -510,6 +538,7 @@ private:
     quint64 m_lastRequestId = 0;
     quint64 m_lastSetId = 0;
     bool m_writing = false;
+    bool m_standing = false; ///< GAP-G1: an offer was sent and not yet withdrawn (an empty offer was not sent since)
     std::optional<QString> m_lastWritten;
     std::optional<QByteArray> m_lastWrittenImage;
     std::optional<QByteArray> m_lastWrittenHtml; // OPT-077: normalised UTF-8 of our last text+html write

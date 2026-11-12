@@ -3608,6 +3608,25 @@ private Q_SLOTS:
         QVERIFY(policy && !policy->hostToClient && !policy->clientToHost);
     }
 
+    // GAP-G1 (wire 23): a ClipboardOffer of flags 0 takes back what the controller was told, once; nothing told, nothing sent.
+    void aClearedOfferWithdrawsTheAnnouncementAtTheClient()
+    {
+        ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
+        QVERIFY(rig.ok);
+        rig.lastPolicy();
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 0}));
+        QTest::qWait(80);
+        QVERIFY(rig.sent.formatLists.isEmpty()); // nothing was announced
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{2, ConsoleWorkerWire::ClipboardOfferText}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 1);
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{3, 0}));
+        QTRY_COMPARE(rig.sent.formatLists.size(), 2);
+        QVERIFY(rig.sent.formatLists.last().isEmpty());
+        rig.workerSends(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{4, 0}));
+        QTest::qWait(80);
+        QCOMPARE(rig.sent.formatLists.size(), 2);
+    }
+
     void clipboardHostCopyPasteFlowsThroughTheWorkerOnDemand()
     {
         ClipboardRig rig(ConsoleSeat::Adapter::PhysicalUser, quint32(getuid()));
@@ -4265,12 +4284,14 @@ private Q_SLOTS:
                                  {u"images"_s, true}, // OPT-072: pictures follow the same directions
                                  {u"maxImageBytes"_s, 16 * 1024 * 1024},
                                  {u"html"_s, true}, // OPT-077: formatted text too
-                                 {u"maxHtmlBytes"_s, 8 * 1024 * 1024}};
+                                 {u"maxHtmlBytes"_s, 8 * 1024 * 1024},
+                                 {u"clearedNotice"_s, true}}; // GAP-G1: the private `clipboard-cleared` notice
             // OPT-078: file copy follows ClipboardFiles (both by default) per direction, and the clipboard direction narrows it too.
             expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
                                                     {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
                                                     {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true},
-                                                    {u"window"_s, QJsonObject{{u"maxBytes"_s, 4194304}, {u"maxCount"_s, 128}}}}); // OPT-078 small files
+                                                    {u"window"_s, QJsonObject{{u"maxBytes"_s, 4194304}, {u"maxCount"_s, 128}}}, // OPT-078 small files
+                                                    {u"hostNeverEchoes"_s, true}}); // GAP-G3: staged files are never offered back
             QCOMPARE(caps.value(u"clipboard"_s).toObject(), expected);
         }
     }

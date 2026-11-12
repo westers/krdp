@@ -1120,8 +1120,9 @@ private Q_SLOTS:
         h.host.uriList = uriFor(staged);
         h.host.ownUri = ownedByUs;
         h.board->hostChanged();
-        QTest::qWait(HostClipboard::SettleMs * 4);
-        QCOMPARE(h.offers().size(), 1);
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(0)); // GAP-G1: the client is told that nothing is offered any more
+        QVERIFY(h.offers().last().seq > h.offers().first().seq);
         // ...and X is no longer what a paste gets: the file service no longer has a current file offer
         h.board->request({2, MaxClipboardFileListBytes, ClipboardKind::Files, true});
         QTRY_COMPARE(h.data().size(), 2);
@@ -1131,7 +1132,8 @@ private Q_SLOTS:
         h.host.ownUri = false;
         h.host.uriList = uriFor(x);
         h.board->hostChanged();
-        QTRY_COMPARE(h.offers().size(), 2);
+        QTRY_COMPARE(h.offers().size(), 3);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferFiles);
         h.board->request({3, MaxClipboardFileListBytes, ClipboardKind::Files, true});
         QTRY_COMPARE(h.data().size(), 3);
         QCOMPARE(h.data().last().status, ClipboardStatus::Ok);
@@ -1153,11 +1155,150 @@ private Q_SLOTS:
         h.host.uriList.clear();
         h.host.hasText = false;
         h.board->hostChanged();
-        QTest::qWait(HostClipboard::SettleMs * 4);
-        QCOMPARE(h.offers().size(), 1);
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(0)); // GAP-G1
         h.board->request({1, MaxClipboardFileListBytes, ClipboardKind::Files, true});
         QTRY_COMPARE(h.data().size(), 1);
         QCOMPARE(h.data().last().status, ClipboardStatus::Gone);
+    }
+
+    // ---- GAP-G1 (wire 23): the host clipboard holds nothing offered any more -> one ClipboardOffer with flags 0 ----
+    void anEmptiedHostClipboardIsReportedOnceWhateverWasOffered_data()
+    {
+        QTest::addColumn<int>("what"); // 0 text, 1 image, 2 html + text
+        QTest::newRow("text") << 0;
+        QTest::newRow("image") << 1;
+        QTest::newRow("html and text") << 2;
+    }
+    void anEmptiedHostClipboardIsReportedOnceWhateverWasOffered()
+    {
+        QFETCH(int, what);
+        Harness h;
+        h.allow(true, true);
+        h.host.text = what == 1 ? QString() : QStringLiteral("copied");
+        h.host.hasText = what != 1;
+        if (what == 1) h.host.image = encode(picture(), "PNG");
+        if (what == 2) h.host.html = QByteArrayLiteral("<b>copied</b>");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        QVERIFY(h.offers().first().flags != 0);
+        h.host.hasText = false;
+        h.host.text.clear();
+        h.host.image.clear();
+        h.host.html.clear();
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(0));
+        QCOMPARE(h.offers().last().seq, h.offers().first().seq + 1);
+        // still empty: no second report
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QCOMPARE(h.offers().size(), 2);
+        // and a new copy is offered normally again
+        h.host.hasText = true;
+        h.host.text = QStringLiteral("again");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 3);
+        QCOMPARE(h.offers().last().flags, ClipboardOfferText);
+    }
+
+    // Nothing offered, nothing to take back: an empty clipboard or a suppressed staged list says nothing.
+    void nothingIsReportedWhenNothingWasOffered()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, false, true);
+        h.host.hasText = false;
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        const QString staged = h.host.cache.filePath(QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"));
+        QVERIFY(QDir().mkpath(QFileInfo(staged).absolutePath()));
+        QFile f(staged);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.close();
+        h.host.uriList = uriFor(staged);
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QVERIFY(h.offers().isEmpty());
+    }
+
+    // The staged-list suppression with files off (the path guard is unconditional): the text offer that stood is taken back.
+    void aSuppressedStagedListReportsTheEarlierTextOffer()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, false, true);
+        h.host.text = QStringLiteral("earlier text");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        const QString staged = h.host.cache.filePath(QStringLiteral("krdp-clip/c-0000000000000001/1/staged.txt"));
+        QVERIFY(QDir().mkpath(QFileInfo(staged).absolutePath()));
+        QFile f(staged);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.close();
+        h.host.hasText = false;
+        h.host.uriList = uriFor(staged);
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(0));
+    }
+
+    // The client's own text coming back is an echo, not a change of what the host offers: no report (the client owns that clipboard).
+    void theEchoOfTheClientsOwnTextIsNotReported()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.text = QStringLiteral("host copy");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        h.board->set({1, 5, QStringLiteral("from the client")});
+        QCOMPARE(h.results().last().status, ClipboardSetStatus::Written);
+        h.board->hostChanged(); // the host's own notification for the write: ignored while writing
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QCOMPARE(h.offers().size(), 1);
+        // the asynchronous echo that arrives after the write
+        h.board->hostChanged();
+        QTest::qWait(HostClipboard::SettleMs * 4);
+        QCOMPARE(h.offers().size(), 1);
+        for (const auto &offer : h.offers()) QVERIFY(offer.flags != 0);
+    }
+
+    void hostToClientGoingOffReportsAnOfferThatStood()
+    {
+        Harness h;
+        h.allow(true, true);
+        h.host.text = QStringLiteral("copied");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        h.allow(false, true, false, false, 2); // e.g. the screen locked or the setting went off
+        QCOMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(0));
+        h.allow(false, true, false, false, 3);
+        QCOMPARE(h.offers().size(), 2); // once
+        // nothing stood: nothing is reported
+        Harness quiet;
+        quiet.allow(true, true);
+        quiet.allow(false, true, false, false, 2);
+        QVERIFY(quiet.offers().isEmpty());
+    }
+
+    // The staged copy of the client's files leaves the host clipboard (the controller moved away; the 24 h expiry uses the same withdrawal):
+    // what the client was told about is taken back.
+    void aWithdrawnStagedCopyReportsTheOfferThatStood()
+    {
+        Harness h;
+        h.allow(true, true, false, false, 1, 5, false, true);
+        h.host.text = QStringLiteral("host text");
+        h.board->hostChanged();
+        QTRY_COMPARE(h.offers().size(), 1);
+        const auto descriptor = ClipboardFileDescriptor::encode({{QStringLiteral("hello.txt"), false, 5, std::nullopt}}).data;
+        h.board->staging().offer(FilePushOffer{1, true, 0, descriptor});
+        QTRY_COMPARE(h.pushReplies().size(), 1);
+        h.board->staging().data(FilePushData{1, 0, 0, QByteArrayLiteral("hello")});
+        QTRY_VERIFY(!h.pushStates().isEmpty() && h.pushStates().last().phase == FilePushPhase::Done);
+        QCOMPARE(h.offers().size(), 1);
+        h.board->setControl({6, true});
+        QTRY_COMPARE(h.host.uriClears, 1);
+        QCOMPARE(h.offers().size(), 2);
+        QCOMPARE(h.offers().last().flags, quint8(0));
     }
 
     // REVIEW-S5 (finding 8): the offer-level check was lexical, so with a symlinked cache directory a third party that reports canonical

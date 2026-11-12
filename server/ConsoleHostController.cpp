@@ -297,6 +297,14 @@ ConsoleHostController::ConsoleHostController(Server *server, WorkerLauncher laun
         syncClipboard();
     });
     connect(&m_endpoint, &ConsoleWorkerEndpoint::clipboardOffered, this, [this](quint64, quint8 flags) {
+        if (!flags) {
+            // GAP-G1 (wire 23): the host clipboard holds nothing offered any more. Every client that was told about an earlier copy is told it is
+            // gone (a viewer demoted meanwhile included); one that was told nothing is left alone.
+            for (const auto &client : m_clients) {
+                if (client->connection && client->connection->clipboard()) client->connection->clipboard()->withdrawHostOffer();
+            }
+            return;
+        }
         for (const auto &client : m_clients) {
             if (client->connection && client->clipboardPlan && client->clipboardPlan->hostToClient && m_control.ownsControl(client->id)) {
                 const bool files = flags & ConsoleWorkerWire::ClipboardOfferFiles;

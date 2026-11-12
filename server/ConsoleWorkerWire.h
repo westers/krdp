@@ -95,7 +95,10 @@ namespace KRdp::ConsoleWorkerWire
 // strictly in order) and is answered by FilePushAck; FilePushCancel ends one transfer or all (seq 0). Worker -> broker: FilePushState (at most 4/s)
 // says Staging / Offered (the files are on the host clipboard) / Done / Failed with a reason. File names never appear in these records or any log.
 // Nothing here is back-compatible with 21 (paired broker and worker, installed together).
-constexpr quint16 ProtocolVersion = 22;
+// 23 (GAP-G1): ClipboardOffer flags 0 is now valid and means "the host clipboard holds nothing this worker offers": the broker withdraws what it
+// announced to the client (an empty CLIPRDR Format List) and, with nothing announced, does nothing. Nothing else changes; 22 is not accepted
+// (paired broker and worker, installed together).
+constexpr quint16 ProtocolVersion = 23;
 constexpr quint32 MaxRecordBytes = 64 * 1024 * 1024;
 constexpr int MaxFrameDimension = 16384;
 /// The console launcher passes the per-launch broker socket path here, not in argv (AUD-C-9).
@@ -1391,7 +1394,10 @@ inline std::optional<ClipboardPolicy> clipboardPolicy(const Record &record)
 /** Worker -> broker: the host's clipboard changed. No contents, no length. */
 struct ClipboardOffer {
     quint64 seq = 0;
-    quint8 flags = ClipboardOfferText; // bit 0: text available, bit 1 (wire 19): an image, bit 2 (wire 20): HTML, bit 3 (wire 21): files (alone)
+    /// bit 0: text available, bit 1 (wire 19): an image, bit 2 (wire 20): HTML, bit 3 (wire 21): files (alone).
+    /// Wire 23: 0 = nothing is offered any more (the host clipboard emptied or became something this worker never offers); the broker withdraws
+    /// what it announced to the client.
+    quint8 flags = ClipboardOfferText;
     bool operator==(const ClipboardOffer &) const = default;
 };
 
@@ -1411,7 +1417,7 @@ inline std::optional<ClipboardOffer> clipboardOffer(const Record &record)
     stream.setByteOrder(QDataStream::BigEndian);
     ClipboardOffer offer;
     stream >> offer.seq >> offer.flags;
-    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !offer.seq || !offer.flags
+    if (stream.status() != QDataStream::Ok || !stream.atEnd() || !offer.seq
         || offer.flags > (ClipboardOfferText | ClipboardOfferImage | ClipboardOfferHtml | ClipboardOfferFiles)) return std::nullopt;
     if ((offer.flags & ClipboardOfferFiles) && offer.flags != ClipboardOfferFiles) return std::nullopt; // files are announced alone
     return offer;

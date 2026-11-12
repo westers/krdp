@@ -207,7 +207,7 @@ Q_SIGNALS:
     /** FIX-CURSOR: the desktop's cursor shape changed (also in cursorShape()). */
     void pointerStateReceived(const QJsonObject &state);
     void cursorShapeReceived(const KRdp::ConsoleWorkerWire::CursorShape &shape);
-    /** OPT-067: the host copied text, OPT-072 and/or an image (\a flags: ClipboardOfferText / ClipboardOfferImage; no contents). Only while the policy allows host to client, newest seq only. */
+    /** OPT-067: the host copied text, OPT-072 and/or an image (\a flags: ClipboardOfferText / ClipboardOfferImage; no contents). Only while the policy allows host to client, newest seq only. \a flags 0 (wire 23): nothing is offered any more; forwarded whatever the policy. */
     void clipboardOffered(quint64 seq, quint8 flags);
     /** OPT-067: the answer to a requestClipboard() id this endpoint issued and has not forgotten. */
     void clipboardDataReceived(const KRdp::ConsoleWorkerWire::ClipboardData &data);

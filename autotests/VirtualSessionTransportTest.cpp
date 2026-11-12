@@ -2652,6 +2652,26 @@ private Q_SLOTS:
         });
     }
 
+    // GAP-G1 (wire 23): a ClipboardOffer of flags 0 takes back the announcement at the client, once; nothing announced, nothing sent.
+    void aClearedOfferWithdrawsTheAnnouncementAtTheClient() {
+        microphoneFixture([&](auto &t, auto &, auto &, auto &worker) {
+            ClipChannel channel;
+            channel.attach(t.m_connection->clipboard());
+            t.syncClipboard(1000);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{1, 0})); worker.flush();
+            QTest::qWait(80);
+            QVERIFY(channel.formatLists.isEmpty());
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{2, 1})); worker.flush();
+            QTRY_COMPARE(channel.formatLists.size(), 1);
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{3, 0})); worker.flush();
+            QTRY_COMPARE(channel.formatLists.size(), 2);
+            QVERIFY(channel.formatLists.last().isEmpty());
+            worker.write(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{4, 0})); worker.flush();
+            QTest::qWait(80);
+            QCOMPARE(channel.formatLists.size(), 2);
+        });
+    }
+
     // ---- OPT-067 clipboard bridge ----
     void clipboardBridgeFollowsTheBindingAndTheOwner() {
         microphoneFixture([&](auto &t, auto &, auto &endpoint, auto &worker) {
