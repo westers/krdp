@@ -1251,6 +1251,13 @@ target_link_libraries(ConnectionAdmissionTest PRIVATE Qt6::Test Qt6::Core Qt6::N
 add_test(NAME ConnectionAdmissionTest COMMAND ConnectionAdmissionTest)
 set_tests_properties(ConnectionAdmissionTest PROPERTIES TIMEOUT 60)
 
+# REVIEW-S1: the PAM conversation callback.
+add_executable(PamConversationTest PamConversationTest.cpp)
+target_include_directories(PamConversationTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${PAM_INCLUDE_DIR})
+target_link_libraries(PamConversationTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME PamConversationTest COMMAND PamConversationTest)
+set_tests_properties(PamConversationTest PROPERTIES TIMEOUT 60)
+
 # OPT-055 K3 / T-R5: accept-error (EMFILE) recovery and bounded Server teardown.
 add_executable(ServerAcceptRecoveryTest ServerAcceptRecoveryTest.cpp)
 target_include_directories(ServerAcceptRecoveryTest PRIVATE ${CMAKE_SOURCE_DIR}/src)

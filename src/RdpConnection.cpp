@@ -60,6 +60,7 @@
 #include "InputHandler.h"
 #include "LayoutControl.h"
 #include "NetworkDetection.h"
+#include "PamConversation.h"
 #include "PeerContext_p.h"
 #include "PipeWireMicrophone.h"
 #include "PipeWireCamera.h"
@@ -433,6 +434,9 @@ bool startCameraIfRequested(RemoteCamera *camera)
     return true;
 }
 
+// Largest RDPECAM sample accepted, for the worker and the local path alike.
+constexpr UINT MaxCameraSampleBytes = 8 * 1024 * 1024;
+
 UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE *response)
 {
     auto *camera = static_cast<RemoteCamera *>(context->userdata);
@@ -446,12 +450,12 @@ UINT cameraSample(CameraDeviceServerContext *context, const CAM_SAMPLE_RESPONSE 
         // The FreeRDP callback must never queue an unbounded number of webcam frames
         // while the desktop worker is slow or absent. The broker acknowledges even
         // a dropped frame after it has tried to write the worker socket.
-        if (response->SampleSize <= 8 * 1024 * 1024 && camera->epoch == camera->currentEpoch->load()
+        if (response->SampleSize <= MaxCameraSampleBytes && camera->epoch == camera->currentEpoch->load()
             && !camera->framePending->exchange(true)) {
             Q_EMIT camera->connection->externalCameraFrame(camera->epoch,
                 QByteArray(reinterpret_cast<const char *>(response->Sample), response->SampleSize));
         }
-    } else {
+    } else if (response->SampleSize <= MaxCameraSampleBytes) {
         camera->endpoint->writeMjpeg(QByteArray(reinterpret_cast<const char *>(response->Sample), response->SampleSize));
     }
     CAM_SAMPLE_REQUEST request{};
@@ -597,73 +601,11 @@ void KRdp::selectVaapiDriver()
 namespace KRdp
 {
 
-#include <security/pam_appl.h>
-
-typedef struct {
-    QByteArray user;
-    QByteArray password;
-} RDPConnectionAuthData;
-
 typedef struct {
     pam_handle_t *handle;
     struct pam_conv pamc;
-    RDPConnectionAuthData appdata;
+    PamConversationData appdata;
 } RdpConnectionPamHandle;
-
-static int pam_conv(int num_msg, const struct pam_message **msg, struct pam_response **resp, void *appdata_ptr)
-{
-    int pam_status = PAM_CONV_ERR;
-    RDPConnectionAuthData *appdata = NULL;
-    struct pam_response *response = NULL;
-    WINPR_ASSERT(num_msg >= 0);
-    appdata = (RDPConnectionAuthData *)appdata_ptr;
-    WINPR_ASSERT(appdata);
-
-    if (!(response = (struct pam_response *)calloc((size_t)num_msg, sizeof(struct pam_response))))
-        return PAM_BUF_ERR;
-
-    for (int index = 0; index < num_msg; index++) {
-        switch (msg[index]->msg_style) {
-        case PAM_PROMPT_ECHO_ON:
-            response[index].resp = _strdup(appdata->user.constData());
-
-            if (!response[index].resp)
-                goto out_fail;
-
-            response[index].resp_retcode = PAM_SUCCESS;
-            break;
-
-        case PAM_PROMPT_ECHO_OFF:
-            response[index].resp = _strdup(appdata->password.constData());
-
-            if (!response[index].resp)
-                goto out_fail;
-
-            response[index].resp_retcode = PAM_SUCCESS;
-            break;
-
-        default:
-            pam_status = PAM_CONV_ERR;
-            goto out_fail;
-        }
-    }
-
-    *resp = response;
-    return PAM_SUCCESS;
-out_fail:
-
-    for (int index = 0; index < num_msg; ++index) {
-        if (response[index].resp) {
-            memset(response[index].resp, 0, strlen(response[index].resp));
-            free(response[index].resp);
-        }
-    }
-
-    memset(response, 0, sizeof(struct pam_response) * (size_t)num_msg);
-    free(response);
-    *resp = NULL;
-    return pam_status;
-}
 
 static std::optional<quint32> pamAuthenticate(const QString &user, const QString &password)
 {
@@ -672,7 +614,11 @@ static std::optional<quint32> pamAuthenticate(const QString &user, const QString
 
     info.appdata.user = user.toLatin1();
     info.appdata.password = password.toLatin1();
-    info.pamc.conv = &pam_conv;
+    // REVIEW-S1: the Latin-1 copy of the password lives only for this call.
+    const auto scrub = qScopeGuard([&] {
+        scrubBytes(info.appdata.password);
+    });
+    info.pamc.conv = &pamConversation;
     info.pamc.appdata_ptr = &info.appdata;
 
     pam_status = pam_start("login", 0, &info.pamc, &info.handle);
@@ -687,6 +633,10 @@ static std::optional<quint32> pamAuthenticate(const QString &user, const QString
 
     pam_status = pam_authenticate(info.handle, 0);
 
+    if (info.appdata.ignoredMessages > 0) {
+        // Never the text: a PAM stack may print account details.
+        qCDebug(KRDP) << "PAM printed" << info.appdata.ignoredMessages << "informational message(s) during the login; ignored";
+    }
     if (pam_status != PAM_SUCCESS) {
         qWarning() << "pam_authenticate failure:" << pam_strerror(info.handle, pam_status);
         return {};
@@ -1009,11 +959,13 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
         }
         break;
     case CloseReason::AuthenticationFailed:
-        freerdp_set_error_info(d->peer->context->rdp, ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES);
-        // Send it now as well: Close() sends Deactivate All first, and a client in the
-        // deactivated state ignores the Set Error Info that follows it, reporting the
-        // ultimatum as ERRINFO_LOGOFF_BY_USER instead.
-        freerdp_send_error_info(d->peer->context->rdp);
+        if (d->peer && d->peer->context) {
+            freerdp_set_error_info(d->peer->context->rdp, ERRINFO_SERVER_INSUFFICIENT_PRIVILEGES);
+            // Send it now as well: Close() sends Deactivate All first, and a client in the
+            // deactivated state ignores the Set Error Info that follows it, reporting the
+            // ultimatum as ERRINFO_LOGOFF_BY_USER instead.
+            freerdp_send_error_info(d->peer->context->rdp);
+        }
         break;
     case CloseReason::None:
         break;
@@ -1835,7 +1787,7 @@ bool RdpConnection::onPostConnect()
     }
 
     const QString username = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Username));
-    const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
+    QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
 
     bool authenticated = false;
     std::optional<quint32> pamUid, ownerUid;
@@ -1859,9 +1811,10 @@ bool RdpConnection::onPostConnect()
     if (!authenticated) {
         // The broker policy's aliases/verifiers use Unicode text. Decode the
         // actual UTF-8 RDP fields; preserve the separate legacy/PAM path above.
-        ownerUid = d->server->mappedCredentialIdentity(
-            QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Username)),
-            QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Password)));
+        QString utf8Password = QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Password));
+        ownerUid = d->server->mappedCredentialIdentity(QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Username)), utf8Password);
+        utf8Password.fill(QLatin1Char('\0'));
+        utf8Password.clear();
         if (ownerUid) {
             qCInfo(KRDP) << "Custom credential authenticated for an explicitly configured desktop owner";
             authenticated = true;
@@ -1873,8 +1826,17 @@ bool RdpConnection::onPostConnect()
         authenticated = true;
     }
 
-    // REVIEW-S1: feeds the per-source failure backoff and frees the connection's
-    // slot in the unauthenticated-connection cap.
+    // REVIEW-S1: every verifier has returned. Overwrite the QString copy and
+    // FreeRDP's own copy of the password; the settings are not read again (nothing
+    // after PostConnect uses FreeRDP_Password: no NLA, and the worker handoff and a
+    // reconnect start from a new connection). What FreeRDP read off the wire into
+    // its own buffers cannot be reached from here.
+    password.fill(QLatin1Char('\0'));
+    password.clear();
+    if (auto *stored = const_cast<char *>(freerdp_settings_get_string(settings, FreeRDP_Password))) {
+        ::explicit_bzero(stored, ::strlen(stored));
+        freerdp_settings_set_string(settings, FreeRDP_Password, nullptr);
+    }
     d->server->recordLoginResult(this, authenticated);
 
     // Devices (RDPSND, AUDIN, RDPECAM) are created by the session loop's

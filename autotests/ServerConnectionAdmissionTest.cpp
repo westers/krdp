@@ -3,7 +3,7 @@
 
 // REVIEW-S1 against a real KRdp::Server on 127.0.0.1: the caps on connections
 // that have not authenticated (closed at accept, before TLS), the per-source
-// failed-login backoff.
+// failed-login backoff, and that a password does not outlive its check.
 // Raw TCP sockets stand in for stalled handshakes; the real libfreerdp client
 // in krdpctl-probe makes the logins. Several loopback source addresses
 // (127.0.0.2, ...) stand in for several clients.
@@ -18,6 +18,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+
+#include <freerdp/settings.h>
 
 #include "LayoutControl.h"
 #include "RdpConnection.h"
@@ -40,6 +42,8 @@ private:
     QString m_certificate;
     QString m_key;
     int m_displayInfo = 0;
+    bool m_passwordClearedAtAuthentication = false;
+    bool m_passwordSeenInSettings = false;
 
     std::unique_ptr<Server> startServer(const ConnectionAdmission::Limits &limits, std::chrono::milliseconds replyDelay = 0ms)
     {
@@ -54,8 +58,13 @@ private:
         m_displayInfo = 0;
         connect(server.get(), &Server::newConnectionCreated, this, [this, replyDelay](RdpConnection *connection) {
             QPointer<RdpConnection> guard(connection);
-            connect(connection, &RdpConnection::clientDisplayInfoReceived, connection, [this]() {
+            connect(connection, &RdpConnection::clientDisplayInfoReceived, connection, [this, guard]() {
                 ++m_displayInfo;
+                if (guard && guard->freerdpContext()) {
+                    const char *stored = freerdp_settings_get_string(guard->freerdpContext()->settings, FreeRDP_Password);
+                    m_passwordSeenInSettings = true;
+                    m_passwordClearedAtAuthentication = !stored || !*stored;
+                }
             }, Qt::QueuedConnection);
             connect(connection, &RdpConnection::controlRecordReceived, connection, [guard, replyDelay](const QJsonObject &record) {
                 if (record.value(QLatin1String("type")).toString() == QLatin1String("query")) {
@@ -281,6 +290,17 @@ private Q_SLOTS:
         auto other = connectFrom(QHostAddress(QStringLiteral("127.0.0.9")), server->serverPort());
         QVERIFY(other);
         QVERIFY(staysOpen(*other, 300));
+    }
+
+    void passwordIsClearedFromTheSettingsOnceChecked()
+    {
+        m_passwordSeenInSettings = false;
+        m_passwordClearedAtAuthentication = false;
+        auto server = startServer({});
+        QVERIFY(server);
+        QCOMPARE(runProbe(server->serverPort(), Password), 0);
+        QTRY_VERIFY(m_passwordSeenInSettings);
+        QVERIFY2(m_passwordClearedAtAuthentication, "FreeRDP still holds the password after authentication");
     }
 };
 
