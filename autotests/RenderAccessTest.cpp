@@ -45,7 +45,7 @@ std::optional<QByteArray> inSandbox(const QString &mode, const QStringList &bind
     QProcess process;
     process.setProcessChannelMode(QProcess::SeparateChannels);
     auto environment = QProcessEnvironment::systemEnvironment();
-    environment.remove(QStringLiteral("KRDP_RENDER_NODE"));
+    environment.remove(QStringLiteral("FARSIDE_RENDER_NODE"));
     environment.insert(QStringLiteral("LIBVA_MESSAGING_LEVEL"), QStringLiteral("1")); // libva prints info on stdout
     process.setProcessEnvironment(environment);
     process.start(program, arguments);
@@ -128,7 +128,7 @@ void RenderAccessTest::probeIsStableWithoutADriverName()
         QProcess process;
         auto environment = QProcessEnvironment::systemEnvironment();
         environment.remove(QStringLiteral("LIBVA_DRIVER_NAME"));
-        environment.remove(QStringLiteral("KRDP_RENDER_NODE"));
+        environment.remove(QStringLiteral("FARSIDE_RENDER_NODE"));
         environment.insert(QStringLiteral("LIBVA_MESSAGING_LEVEL"), QStringLiteral("1"));
         process.setProcessEnvironment(environment);
         process.start(QCoreApplication::applicationFilePath(), {QStringLiteral("--probe")});
@@ -206,16 +206,16 @@ void RenderAccessTest::vaapiDriverModes()
 
     QProcessEnvironment environment;
     environment.insert(QStringLiteral("LIBVA_DRIVER_NAME"), QStringLiteral("radeonsi")); // from the desktop session
-    environment.insert(QStringLiteral("KRDP_AUTO_VAAPI_DRIVER"), QStringLiteral("0"));
+    environment.insert(QStringLiteral("FARSIDE_AUTO_VAAPI_DRIVER"), QStringLiteral("0"));
     VaapiDriverMode::apply(environment, QStringLiteral("auto"));
     QCOMPARE(environment.value(QStringLiteral("LIBVA_DRIVER_NAME")), QStringLiteral("radeonsi"));
-    QVERIFY(!environment.contains(QStringLiteral("KRDP_AUTO_VAAPI_DRIVER")));
+    QVERIFY(!environment.contains(QStringLiteral("FARSIDE_AUTO_VAAPI_DRIVER")));
     VaapiDriverMode::apply(environment, QStringLiteral("iHD"));
-    QCOMPARE(environment.value(QStringLiteral("KRDP_FORCE_VAAPI_DRIVER")), QStringLiteral("iHD"));
+    QCOMPARE(environment.value(QStringLiteral("FARSIDE_FORCE_VAAPI_DRIVER")), QStringLiteral("iHD"));
     QCOMPARE(environment.value(QStringLiteral("LIBVA_DRIVER_NAME")), QStringLiteral("iHD"));
     VaapiDriverMode::apply(environment, QStringLiteral("off"));
-    QVERIFY(!environment.contains(QStringLiteral("KRDP_FORCE_VAAPI_DRIVER")));
-    QCOMPARE(environment.value(QStringLiteral("KRDP_AUTO_VAAPI_DRIVER")), QStringLiteral("0"));
+    QVERIFY(!environment.contains(QStringLiteral("FARSIDE_FORCE_VAAPI_DRIVER")));
+    QCOMPARE(environment.value(QStringLiteral("FARSIDE_AUTO_VAAPI_DRIVER")), QStringLiteral("0"));
 }
 
 void RenderAccessTest::launchPlanCarriesTheVaapiDriver()

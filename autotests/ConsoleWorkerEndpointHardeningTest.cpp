@@ -62,12 +62,12 @@ class ConsoleWorkerEndpointHardeningTest : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
-    void wireVersionIsFive()
+    void wireVersionIsPinned()
     {
         // Reset to 1 on 2026-09-27 (AUD-C-6); 2 since AUD-FIX7 (codec-tagged frames, encoder
         // records); 3 since STATS-S6 (EncoderConfig::statsWanted, EncoderStats); 4 since
         // FIX-CURSOR (Cursor); 5 since AV1-Q (EncoderConfig carries the AV1 tile count).
-        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(11));
+        QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(22)); // 22: broker and worker ship in one package, so both move together
     }
 
     void pointerPolicyRequiresFreshWorkerGrantAndSnapshot()

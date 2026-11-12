@@ -202,8 +202,8 @@ void CursorShapeTest::wireRoundTrip()
     hide.type = Shape::Type::Hidden;
     QCOMPARE(roundTrip(hide), std::optional(hide));
     QCOMPARE(roundTrip(Shape{}), std::optional(Shape{}));
-    QCOMPARE(ConsoleWorkerWire::LastKind, ConsoleWorkerWire::Kind::ChromaTiming);
-    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(11)); // paired protocol, including Console output policy
+    QCOMPARE(ConsoleWorkerWire::LastKind, ConsoleWorkerWire::Kind::FilePushState); // pins the last kind: a new kind must update this
+    QCOMPARE(ConsoleWorkerWire::ProtocolVersion, quint16(22)); // paired protocol (broker and worker ship in one package)
 }
 
 void CursorShapeTest::wireRejectsMalformed()

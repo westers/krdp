@@ -22,8 +22,8 @@ private Q_SLOTS:
     void brokerHasPrivateHomeForFreeRdp() {
         QFile unit(QString::fromLocal8Bit(KRDP_HOST_UNIT)); QVERIFY(unit.open(QIODevice::ReadOnly));
         const auto bytes = unit.readAll();
-        QVERIFY(bytes.contains("HOME=/var/lib/krdp/virtual-host "));
-        QVERIFY(bytes.contains("StateDirectory=krdp/virtual-sessions krdp/virtual-host\n"));
+        QVERIFY(bytes.contains("HOME=/var/lib/farside/virtual-host "));
+        QVERIFY(bytes.contains("StateDirectory=farside/virtual-sessions farside/virtual-host\n"));
         QVERIFY(bytes.contains("StateDirectoryMode=0700\n"));
     }
     void serviceHasExplicitNondelegatedSlice() {
@@ -34,7 +34,7 @@ private Q_SLOTS:
         QVERIFY(bytes.contains("\nKillMode=mixed\n"));
         QVERIFY(bytes.contains("--pam-keeper "));
         QVERIFY(bytes.contains("\nExecStopPost=/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 "));
-        QVERIFY(bytes.contains("/bin/krdp-virtual-session-cleanup --session %i\n"));
+        QVERIFY(bytes.contains("/bin/farside-virtual-session-cleanup --session %i\n"));
     }
     void pamKeeperRequiresCleanPrivilegedOwner() {
         QProcess keeper;

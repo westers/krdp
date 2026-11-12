@@ -14,7 +14,7 @@ class VirtualSessionServiceScopeTest : public QObject {
 private Q_SLOTS:
     void exactServiceOnly() {
         const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        QCOMPARE(VirtualSessionServiceScope::expectedMembership(id), QByteArray("0::/system.slice/krdp-virtual-session@") + id.toLatin1() + ".service\n");
+        QCOMPARE(VirtualSessionServiceScope::expectedMembership(id), QByteArray("0::/system.slice/farside-virtual-session@") + id.toLatin1() + ".service\n");
         for (const auto &invalid : {QString(), u"../system.slice"_s, u"00000000-0000-0000-0000-000000000000"_s,
                 u"{12345678-1234-1234-1234-123456789abc}"_s, u"12345678-1234-1234-1234-123456789ABC"_s})
             QVERIFY(VirtualSessionServiceScope::expectedMembership(invalid).isEmpty());
