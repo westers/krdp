@@ -310,16 +310,22 @@ private Q_SLOTS:
     {
         // The production package renames the binaries to farside-*; the kernel
         // truncates comm to 15 characters (farside-console-worker -> farside-console).
-        QVERIFY(Journal::isOurProcessName("farside-console"));
+        QVERIFY(Journal::isOurProcessName("farside-console")); // Worker or broker; argv[0] unknown: assume the worker.
+        QVERIFY(Journal::isOurProcessName("farside-console", "farside-console-worker"));
         QVERIFY(Journal::isOurProcessName("farside-server"));
-        QVERIFY(Journal::isOurProcessName("farside-virtual"));
+        QVERIFY(Journal::isOurProcessName("farside-server", "farside-server"));
         QVERIFY(Journal::isOurProcessName("krdp-console-wo"));
         QVERIFY(Journal::isOurProcessName("krdpserver"));
-        // A client, helper or unrelated process is not an output writer.
+        // The broker shares the worker's comm but never writes the journal.
+        QVERIFY(!Journal::isOurProcessName("farside-console", "farside-console-host"));
+        // Other package processes are not output writers: a stale entry whose pid they hold (pids repeat
+        // after a reboot) is dead.
+        QVERIFY(!Journal::isOurProcessName("farside-virtual"));
         QVERIFY(!Journal::isOurProcessName("farside-client"));
         QVERIFY(!Journal::isOurProcessName("farside-authent"));
         QVERIFY(!Journal::isOurProcessName("farside-host-se"));
         QVERIFY(!Journal::isOurProcessName("farside"));
+        QVERIFY(!Journal::isOurProcessName("farside-console-w")); // Not a kernel-truncated name of ours.
         QVERIFY(!Journal::isOurProcessName("bash"));
         QVERIFY(!Journal::isOurProcessName("kwin_wayland"));
         QVERIFY(!Journal::isOurProcessName(QByteArray()));
@@ -327,20 +333,25 @@ private Q_SLOTS:
 
     void ownerAliveUsesInjectedProcessName()
     {
-        const auto named = [](const QByteArray &name) {
-            return [name](qint64) { return std::optional<QByteArray>(name); };
+        const auto named = [](const QByteArray &comm, const QByteArray &program = {}) {
+            return [=](qint64) { return std::optional<Journal::ProcessName>(Journal::ProcessName{comm, program}); };
         };
         const qint64 pid = ::getppid(); // A live process other than this one.
         QVERIFY(pid > 1);
-        QVERIFY(Journal::ownerAlive(pid, named("farside-console"))); // The reported bug: live worker seen as dead.
-        QVERIFY(Journal::ownerAlive(pid, named("krdp-console-wo")));
-        QVERIFY(!Journal::ownerAlive(pid, named("bash"))); // Pid reused by something else.
-        QVERIFY(!Journal::ownerAlive(pid, named("farside-client")));
-        QVERIFY(Journal::ownerAlive(pid, named(QByteArray()))); // Unnamed: stay cautious, count it live.
-        QVERIFY(Journal::ownerAlive(pid, [](qint64) { return std::optional<QByteArray>(); })); // /proc unreadable.
-        QVERIFY(!Journal::ownerAlive(::getpid(), named("farside-console"))); // Never this process.
-        QVERIFY(!Journal::ownerAlive(0, named("farside-console")));
-        QVERIFY(!Journal::ownerAlive(-5, named("farside-console")));
+        QVERIFY(Journal::ownerAliveWith(pid, named("farside-console", "farside-console-worker"))); // The reported bug: live worker seen as dead.
+        QVERIFY(Journal::ownerAliveWith(pid, named("farside-server", "farside-server")));
+        QVERIFY(Journal::ownerAliveWith(pid, named("krdp-console-wo")));
+        QVERIFY(!Journal::ownerAliveWith(pid, named("farside-console", "farside-console-host"))); // The broker is not a writer.
+        QVERIFY(!Journal::ownerAliveWith(pid, named("bash"))); // Pid reused by something else.
+        QVERIFY(!Journal::ownerAliveWith(pid, named("farside-client")));
+        QVERIFY(Journal::ownerAliveWith(pid, named(QByteArray()))); // Unnamed: stay cautious, count it live.
+        QVERIFY(Journal::ownerAliveWith(pid, [](qint64) { return std::optional<Journal::ProcessName>(); })); // /proc unreadable.
+        QVERIFY(!Journal::ownerAliveWith(::getpid(), named("farside-console"))); // Never this process.
+        QVERIFY(!Journal::ownerAliveWith(0, named("farside-console")));
+        QVERIFY(!Journal::ownerAliveWith(-5, named("farside-console")));
+        // The real /proc reader: this test process is neither a writer nor a pid we were asked about.
+        QVERIFY(!Journal::ownerAlive(::getpid()));
+        QVERIFY(!Journal::ownerAlive(4194300)); // Above any default pid_max: not running.
     }
 };
 

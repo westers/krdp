@@ -137,21 +137,30 @@ public:
     /** Every field `plan()` chose to restore now reads back as original. */
     static bool verified(const Entry &entry, const QVector<Current> &before, const QVector<Current> &after);
     /**
-     * A live process other than this one that is one of our own server processes when /proc can say (pid reuse).
-     * An unreadable or empty name counts as alive: a wrongly "dead" owner would let a replay restore outputs
+     * A live process other than this one that is one of our own output-writing processes when /proc can say (pid
+     * reuse). An unreadable or empty name counts as alive: a wrongly "dead" owner would let a replay restore outputs
      * under a live lease holder.
      */
     static bool ownerAlive(qint64 pid);
-    /** Reads /proc/<pid>/comm; nullopt when it cannot be read. Injectable for tests. */
-    using ReadProcessName = std::function<std::optional<QByteArray>(qint64 pid)>;
-    static bool ownerAlive(qint64 pid, const ReadProcessName &readName);
+    /** What /proc says about a process: its comm (15 characters) and the base name of argv[0] (empty when unknown). */
+    struct ProcessName {
+        QByteArray comm;
+        QByteArray program;
+    };
+    /** Reads it; nullopt when the process cannot be read. Injectable for tests. */
+    using ReadProcessName = std::function<std::optional<ProcessName>(qint64 pid)>;
+    /** The same with an injected /proc reader (a distinct name: callers take `&OutputRestoreJournal::ownerAlive` as an Alive callback). */
+    static bool ownerAliveWith(qint64 pid, const ReadProcessName &readName);
     /**
-     * Whether \a comm (the kernel's process name, truncated to 15 characters) belongs to our server binaries:
-     * every `krdp*` binary of a source build, and the `farside-*` names the system package gives them
-     * (`farside-server`, `farside-console-host`/`-worker` -> `farside-console`, `farside-virtual-*` -> `farside-virtual`).
-     * `farside-client`, `farside-authentication-helper` and the like do not write outputs and are not accepted.
+     * Whether a process named \a comm (the kernel's name, truncated to 15 characters) with argv[0] base name
+     * \a program is one that writes this journal: every `krdp*` binary of a source build, and in the system package
+     * (KRDP_BUILD_SYSTEM_PACKAGE renames the binaries) `farside-server` and `farside-console-worker`.
+     * The worker and the broker `farside-console-host` share the comm `farside-console`; \a program tells them
+     * apart (unknown: assumed to be the worker). The broker, `farside-virtual-*`, `farside-client` and other helpers
+     * never write the journal, so a stale entry whose pid they happen to hold (pids repeat after a reboot) is
+     * not mistaken for a live writer.
      */
-    static bool isOurProcessName(const QByteArray &comm);
+    static bool isOurProcessName(const QByteArray &comm, const QByteArray &program = {});
 
     static QByteArray serialize(const QVector<Entry> &entries);
     static std::optional<QVector<Entry>> parse(const QByteArray &json);
