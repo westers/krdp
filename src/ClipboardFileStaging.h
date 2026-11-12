@@ -21,6 +21,12 @@ namespace KRdp::ClipboardFileStaging
  * plan index in a sibling directory, `<connection-id>/<seq>.parts/<index>`, and renamed to its final name when complete,
  * so a reader never sees a half file as final and the temporary name can never collide with, or lengthen, a client's name
  * (see server/HostFileStaging.h). partNameFor()/isPartName() below name the OLD `name.part` scheme; staging no longer uses them.
+ *
+ * This file started as a copy of the client's src/core/ClipboardFileStaging.h and is NO LONGER kept in step with it:
+ * since 2026-11-12 the planning part diverged by design. The client's copy adds `LockState`, `RootEntry.lock`,
+ * `YoungGraceSeconds` and an extra `planSweep` parameter (its sweep must respect locks held by other client processes),
+ * and it does not use the `<seq>.parts/<index>` layout described above. Fix a bug in one, check the other by hand.
+ * scripts/check-shared-headers.sh therefore does not compare the two (docs/shared-headers.md).
  */
 constexpr qint64 MaxAgeSeconds = 24 * 60 * 60;
 inline const QString PartSuffix = QStringLiteral(".part");

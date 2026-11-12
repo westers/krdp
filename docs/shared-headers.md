@@ -32,7 +32,7 @@ set_tests_properties(SharedHeadersDriftCheck PROPERTIES SKIP_RETURN_CODE 77)
 
 | Server | Client |
 |---|---|
-| `src/ClipboardFile{Descriptor,Limits,Names,Pacing,Request,Serve,Staging}.h` | `src/core/` same names |
+| `src/ClipboardFile{Descriptor,Limits,Names,Pacing,Request,Serve}.h` | `src/core/` same names |
 | `src/ClipboardHtml.h`, `src/ClipboardImage.h` | `src/core/` same names |
 | `server/PngMimeData.h`, `server/SelectionReaderFd.h` | `src/core/` same names |
 | `server/SelectionReader.{h,cpp}` | `src/wayland/` same names |
@@ -51,6 +51,7 @@ These share a name or an ancestor but are separate implementations; do not "fix"
 | `src/CodecPolicy.h` | `src/core/CodecPolicy.h` | 1614 | server chooses encoder and link response; client decides what to request and decode |
 | `src/CodecSelection.h` | `src/core/CodecSelection.h` | 534 | each side's own selection rules over the shared codec ids |
 | `server/DeskActivity.h` | `src/core/DeskActivity.h` | 374 | server detects desk input; client handles the notices |
+| `src/ClipboardFileStaging.h` | `src/core/ClipboardFileStaging.h` | 63 | diverged 2026-11-12 (was a checked copy): the client adds `LockState`, `RootEntry.lock`, `YoungGraceSeconds` and an extra `planSweep` parameter, because its sweep must respect locks held by other client processes; the server's layout comment describes `<seq>.parts/<index>`, which the client does not use. Changes to the planning part are reviewed by hand on both sides |
 | `server/HostFiles.h` | `src/core/ClipboardLocalFiles.h` | 75 | same file walk, but the client version serves the local file manager's files for client-to-host copy (OPT-078 phase 3); the "keep the two in step" comment there is about the walk and reads, which are reviewed by hand |
 
 Everything else with a common basename (`main.cpp`, `CMakeLists.txt`, `copyright`, `package-farside.sh`,

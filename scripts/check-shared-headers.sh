@@ -17,7 +17,7 @@
 #     provenance comments and single reworded doc lines; keep every regex as narrow as possible.
 #   - trailing whitespace and blank lines at the end of the file are ignored.
 # Pairs that are intentionally different implementations are NOT listed here (CodecPolicy.h,
-# CodecSelection.h, DeskActivity.h, HostFiles.h vs ClipboardLocalFiles.h): see docs/shared-headers.md.
+# CodecSelection.h, DeskActivity.h, HostFiles.h vs ClipboardLocalFiles.h, ClipboardFileStaging.h): see docs/shared-headers.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -37,7 +37,6 @@ src/ClipboardFileNames.h|src/core/ClipboardFileNames.h|${copy_note}
 src/ClipboardFilePacing.h|src/core/ClipboardFilePacing.h|${copy_note}
 src/ClipboardFileRequest.h|src/core/ClipboardFileRequest.h|${copy_note}
 src/ClipboardFileServe.h|src/core/ClipboardFileServe.h|${copy_note}
-src/ClipboardFileStaging.h|src/core/ClipboardFileStaging.h|${copy_note}
 src/ClipboardHtml.h|src/core/ClipboardHtml.h|${copy_note}
 src/ClipboardImage.h|src/core/ClipboardImage.h|${copy_note}|^ \* OPT-072: image conversion for the clipboard bridge, as pure functions|^ \* server's src/ClipboardImage\.h \(krdp repo\)
 server/PngMimeData.h|src/core/PngMimeData.h|${copy_note}|OPT-072: a clipboard offer that is one PNG
