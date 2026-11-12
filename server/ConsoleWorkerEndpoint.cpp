@@ -11,6 +11,7 @@
 #include <QLocalSocket>
 
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <utility>
@@ -74,14 +75,29 @@ bool ConsoleWorkerEndpoint::listen(const QString &socketName, const ConsoleHando
     // The selected greeter/user worker has a different uid from the system
     // host. The caller places the socket in a directory only that uid (and
     // root) can traverse; the peer uid and then the token are verified here.
-    m_server->setSocketOptions(QLocalServer::WorldAccessOption);
-    QLocalServer::removeServer(socketName);
-    if (!m_server->listen(socketName)) {
+    // The directory is opened and verified once, and the stale-socket removal,
+    // bind and permission change all go through that descriptor (REVIEW-S3): a
+    // swap of the directory (or a link planted in it) after the caller's own
+    // checks cannot redirect what root creates or unlinks. The socket stays at
+    // `socketName`, the path the worker connects to.
+    WorkerSocketBinding::Directory directory;
+    if (!directory.open(socketName, target.uid, error)) {
+        return false;
+    }
+    const int listener = directory.bindListening(error);
+    if (listener < 0) {
+        return false;
+    }
+    if (!m_server->listen(qintptr(listener))) {
         if (error) {
             *error = m_server->errorString();
         }
+        ::close(listener);
+        directory.removeOwned();
         return false;
     }
+    m_socketDirectory = std::move(directory);
+    m_socketName = socketName;
     m_target = target;
     m_token = token;
     return true;
@@ -106,10 +122,10 @@ void ConsoleWorkerEndpoint::close()
     m_watchdogTimer.stop();
     dropWorker();
     if (m_server->isListening()) {
-        const QString name = m_server->fullServerName();
         m_server->close();
-        QLocalServer::removeServer(name);
     }
+    m_socketDirectory.close(); // After the server: removes the socket this endpoint bound, through the held directory.
+    m_socketName.clear();
     m_deframer = {};
     m_target = {};
     m_token.clear();
@@ -139,7 +155,7 @@ bool ConsoleWorkerEndpoint::stopPending() const
 
 QString ConsoleWorkerEndpoint::socketName() const
 {
-    return m_server->fullServerName();
+    return m_socketName;
 }
 
 ConsoleHandoff::Target ConsoleWorkerEndpoint::target() const
@@ -570,7 +586,7 @@ bool ConsoleWorkerEndpoint::processRecords()
     while (const auto record = m_deframer.next()) {
         if (!m_authenticated) {
             const auto greeting = ConsoleWorkerWire::hello(*record);
-            if (!greeting || greeting->sessionId != m_target.sessionId || greeting->uid != m_target.uid || greeting->token != m_token) {
+            if (!greeting || greeting->sessionId != m_target.sessionId || greeting->uid != m_target.uid || !WorkerSocketBinding::constantTimeEqual(greeting->token, m_token)) {
                 fail(QStringLiteral("worker authentication failed"));
                 return false;
             }

@@ -12,6 +12,7 @@
 #include <QScopeGuard>
 #include "AudioPriority.h"
 #include "CursorTracker.h"
+#include "SafeTreeRemoval.h"
 
 #include <algorithm>
 #include <numeric>
@@ -762,7 +763,12 @@ void ConsoleHostController::removeWorkerDirectory()
     if (m_workerDirectory.isEmpty()) {
         return;
     }
-    QDir(m_workerDirectory).removeRecursively();
+    // The directory is owned by the worker's uid. Removing it by path as root would
+    // let that account swap a subdirectory for a symlink mid-walk (REVIEW-S3): walk
+    // through descriptors and never follow a link.
+    if (!SafeTreeRemoval::removeTree(m_workerDirectory)) {
+        qWarning().noquote() << "Console worker directory was not removed completely:" << m_workerDirectory;
+    }
     m_workerDirectory.clear();
 }
 
@@ -891,9 +897,21 @@ void ConsoleHostController::startWorker(const ConsoleHandoff::Target &target)
     // (AUD-C-9). The endpoint additionally checks SO_PEERCRED and the token.
     const QString directory = QDir(m_runtimeDirectory)
                                   .filePath(QStringLiteral("seat0-%1-%2").arg(target.sessionId).arg(QRandomGenerator::system()->generate64(), 0, 16));
-    if (m_runtimeDirectory.isEmpty() || !QDir().mkpath(m_runtimeDirectory) || ::mkdir(QFile::encodeName(directory).constData(), 0700) != 0
-        || (geteuid() == 0 && ::chown(QFile::encodeName(directory).constData(), target.uid, gid_t(-1)) != 0)) {
+    // chown through a descriptor opened without following links, so the owner change can only ever land on
+    // the directory just created (the runtime directory is root-owned; this keeps the step path-race free anyway).
+    bool created = false;
+    const auto createWorkerDirectory = [&] {
+        if (m_runtimeDirectory.isEmpty() || !QDir().mkpath(m_runtimeDirectory)) return false;
+        const QByteArray encoded = QFile::encodeName(directory);
+        if (::mkdir(encoded.constData(), 0700) != 0) return false;
+        created = true;
+        SafeTreeRemoval::Fd handle(::open(encoded.constData(), SafeTreeRemoval::DirFlags));
+        return handle.valid() && (geteuid() != 0 || ::fchown(handle, target.uid, gid_t(-1)) == 0);
+    };
+    if (!createWorkerDirectory()) {
         qWarning().noquote() << "Cannot create console worker directory" << directory;
+        // A directory that was created but could not be handed over is not left behind.
+        if (created) SafeTreeRemoval::removeTree(directory);
         workerFailed();
         return;
     }

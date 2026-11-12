@@ -1325,3 +1325,15 @@ add_executable(DeskActivityTest DeskActivityTest.cpp)
 target_include_directories(DeskActivityTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(DeskActivityTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui KRdp)
 add_test(NAME DeskActivityTest COMMAND DeskActivityTest)
+
+# REVIEW-S3: link-safe removal of the console worker directory (daemon-free, no root needed).
+add_executable(SafeTreeRemovalTest SafeTreeRemovalTest.cpp)
+target_include_directories(SafeTreeRemovalTest PRIVATE ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(SafeTreeRemovalTest PRIVATE Qt6::Test Qt6::Core)
+add_test(NAME SafeTreeRemovalTest COMMAND SafeTreeRemovalTest)
+
+# REVIEW-S3: the worker socket is bound through a verified directory descriptor; constant-time token compare (daemon-free).
+add_executable(WorkerSocketBindingTest WorkerSocketBindingTest.cpp ${CMAKE_SOURCE_DIR}/server/ConsoleWorkerEndpoint.cpp)
+target_include_directories(WorkerSocketBindingTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
+target_link_libraries(WorkerSocketBindingTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
+add_test(NAME WorkerSocketBindingTest COMMAND WorkerSocketBindingTest)

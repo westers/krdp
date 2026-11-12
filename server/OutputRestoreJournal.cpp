@@ -468,18 +468,50 @@ bool OutputRestoreJournal::verified(const Entry &entry, const QVector<Current> &
     return true;
 }
 
+bool OutputRestoreJournal::isOurProcessName(const QByteArray &comm, const QByteArray &program)
+{
+    // Source builds name every binary krdp*. The system package renames them
+    // (KRDP_BUILD_SYSTEM_PACKAGE): farside-server writes this journal (the output
+    // guard) and so does the console worker (farside-console-worker, whose comm is
+    // the kernel's 15-character cut, "farside-console", the same as the broker's
+    // farside-console-host). Only those two are accepted, so a long-lived package
+    // process that merely inherited a stale entry's pid (pids repeat after a
+    // reboot) is not mistaken for the writer.
+    static const QByteArray LegacyPrefix("krdp");
+    static const QByteArray Server("farside-server");
+    static const QByteArray Worker("farside-console-worker");
+    static const QByteArray WorkerOrBroker = Worker.left(15); // TASK_COMM_LEN - 1
+    if (comm.isEmpty()) return false;
+    if (comm.startsWith(LegacyPrefix)) return true;
+    if (comm == Server) return true;
+    if (comm == WorkerOrBroker) return program.isEmpty() || program == Worker;
+    return false;
+}
+
 bool OutputRestoreJournal::ownerAlive(qint64 pid)
+{
+    return ownerAliveWith(pid, [](qint64 other) -> std::optional<ProcessName> {
+        QFile comm(QStringLiteral("/proc/%1/comm").arg(other));
+        if (!comm.open(QIODevice::ReadOnly)) return std::nullopt;
+        ProcessName name{comm.readAll().trimmed(), {}};
+        QFile command(QStringLiteral("/proc/%1/cmdline").arg(other));
+        if (command.open(QIODevice::ReadOnly)) {
+            const QByteArray argv0 = command.read(4096).split('\0').value(0);
+            name.program = argv0.mid(argv0.lastIndexOf('/') + 1);
+        }
+        return name;
+    });
+}
+
+bool OutputRestoreJournal::ownerAliveWith(qint64 pid, const ReadProcessName &readName)
 {
     if (pid <= 0 || pid == qint64(getpid())) return false;
     if (::kill(pid_t(pid), 0) != 0 && errno != EPERM) return false;
     // The PID may have been reused since the crash; when /proc can name the
-    // process, only a krdp process counts.
-    QFile comm(QStringLiteral("/proc/%1/comm").arg(pid));
-    if (comm.open(QIODevice::ReadOnly)) {
-        const QByteArray name = comm.readAll().trimmed();
-        return name.isEmpty() || name.startsWith("krdp");
-    }
-    return true;
+    // process, only one of our own output writers counts.
+    const std::optional<ProcessName> name = readName ? readName(pid) : std::nullopt;
+    if (!name || name->comm.isEmpty()) return true;
+    return isOurProcessName(name->comm, name->program);
 }
 
 OutputRestoreJournal::ReplayResult OutputRestoreJournal::replay(const Read &read, const Apply &apply, const Alive &alive,
