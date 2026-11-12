@@ -136,8 +136,22 @@ public:
     }
     /** Every field `plan()` chose to restore now reads back as original. */
     static bool verified(const Entry &entry, const QVector<Current> &before, const QVector<Current> &after);
-    /** A live process other than this one, named krdp* when /proc can tell (pid reuse). */
+    /**
+     * A live process other than this one that is one of our own server processes when /proc can say (pid reuse).
+     * An unreadable or empty name counts as alive: a wrongly "dead" owner would let a replay restore outputs
+     * under a live lease holder.
+     */
     static bool ownerAlive(qint64 pid);
+    /** Reads /proc/<pid>/comm; nullopt when it cannot be read. Injectable for tests. */
+    using ReadProcessName = std::function<std::optional<QByteArray>(qint64 pid)>;
+    static bool ownerAlive(qint64 pid, const ReadProcessName &readName);
+    /**
+     * Whether \a comm (the kernel's process name, truncated to 15 characters) belongs to our server binaries:
+     * every `krdp*` binary of a source build, and the `farside-*` names the system package gives them
+     * (`farside-server`, `farside-console-host`/`-worker` -> `farside-console`, `farside-virtual-*` -> `farside-virtual`).
+     * `farside-client`, `farside-authentication-helper` and the like do not write outputs and are not accepted.
+     */
+    static bool isOurProcessName(const QByteArray &comm);
 
     static QByteArray serialize(const QVector<Entry> &entries);
     static std::optional<QVector<Entry>> parse(const QByteArray &json);

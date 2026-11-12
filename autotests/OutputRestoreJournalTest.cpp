@@ -13,6 +13,7 @@
 #include <QTest>
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "OutputRestoreJournal.h"
 
@@ -303,6 +304,43 @@ private Q_SLOTS:
         QCOMPARE(journal.entries(), QVector<Journal::Entry>{resizeEntry(4244)});
         const auto corrupt = QDir(directory.path()).entryList({QStringLiteral("j.json.corrupt-*")});
         QCOMPARE(corrupt.size(), 1);
+    }
+
+    void ownerNamesIncludeRenamedPackageBinaries()
+    {
+        // The production package renames the binaries to farside-*; the kernel
+        // truncates comm to 15 characters (farside-console-worker -> farside-console).
+        QVERIFY(Journal::isOurProcessName("farside-console"));
+        QVERIFY(Journal::isOurProcessName("farside-server"));
+        QVERIFY(Journal::isOurProcessName("farside-virtual"));
+        QVERIFY(Journal::isOurProcessName("krdp-console-wo"));
+        QVERIFY(Journal::isOurProcessName("krdpserver"));
+        // A client, helper or unrelated process is not an output writer.
+        QVERIFY(!Journal::isOurProcessName("farside-client"));
+        QVERIFY(!Journal::isOurProcessName("farside-authent"));
+        QVERIFY(!Journal::isOurProcessName("farside-host-se"));
+        QVERIFY(!Journal::isOurProcessName("farside"));
+        QVERIFY(!Journal::isOurProcessName("bash"));
+        QVERIFY(!Journal::isOurProcessName("kwin_wayland"));
+        QVERIFY(!Journal::isOurProcessName(QByteArray()));
+    }
+
+    void ownerAliveUsesInjectedProcessName()
+    {
+        const auto named = [](const QByteArray &name) {
+            return [name](qint64) { return std::optional<QByteArray>(name); };
+        };
+        const qint64 pid = ::getppid(); // A live process other than this one.
+        QVERIFY(pid > 1);
+        QVERIFY(Journal::ownerAlive(pid, named("farside-console"))); // The reported bug: live worker seen as dead.
+        QVERIFY(Journal::ownerAlive(pid, named("krdp-console-wo")));
+        QVERIFY(!Journal::ownerAlive(pid, named("bash"))); // Pid reused by something else.
+        QVERIFY(!Journal::ownerAlive(pid, named("farside-client")));
+        QVERIFY(Journal::ownerAlive(pid, named(QByteArray()))); // Unnamed: stay cautious, count it live.
+        QVERIFY(Journal::ownerAlive(pid, [](qint64) { return std::optional<QByteArray>(); })); // /proc unreadable.
+        QVERIFY(!Journal::ownerAlive(::getpid(), named("farside-console"))); // Never this process.
+        QVERIFY(!Journal::ownerAlive(0, named("farside-console")));
+        QVERIFY(!Journal::ownerAlive(-5, named("farside-console")));
     }
 };
 

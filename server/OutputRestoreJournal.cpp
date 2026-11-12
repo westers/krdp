@@ -468,18 +468,50 @@ bool OutputRestoreJournal::verified(const Entry &entry, const QVector<Current> &
     return true;
 }
 
+bool OutputRestoreJournal::isOurProcessName(const QByteArray &comm)
+{
+    // Source builds name every binary krdp*. The system package renames the server
+    // and helpers (KRDP_BUILD_SYSTEM_PACKAGE): an explicit list, compared the way the
+    // kernel truncates comm (TASK_COMM_LEN - 1 = 15), so farside-client is not ours.
+    static const QByteArray LegacyPrefix("krdp");
+    static const QList<QByteArray> packageBinaries{
+        "farside-server",
+        "farside-console-host",
+        "farside-console-worker",
+        "farside-virtual-host",
+        "farside-virtual-guardian",
+        "farside-virtual-session-entry",
+        "farside-virtual-pam-keeper",
+        "farside-virtual-session-cleanup",
+        "farside-virtual-device-entry",
+    };
+    constexpr qsizetype CommLength = 15;
+    if (comm.isEmpty()) return false;
+    if (comm.startsWith(LegacyPrefix)) return true;
+    for (const QByteArray &name : packageBinaries) {
+        if (comm == name.left(CommLength)) return true;
+    }
+    return false;
+}
+
 bool OutputRestoreJournal::ownerAlive(qint64 pid)
+{
+    return ownerAlive(pid, [](qint64 other) -> std::optional<QByteArray> {
+        QFile comm(QStringLiteral("/proc/%1/comm").arg(other));
+        if (!comm.open(QIODevice::ReadOnly)) return std::nullopt;
+        return comm.readAll().trimmed();
+    });
+}
+
+bool OutputRestoreJournal::ownerAlive(qint64 pid, const ReadProcessName &readName)
 {
     if (pid <= 0 || pid == qint64(getpid())) return false;
     if (::kill(pid_t(pid), 0) != 0 && errno != EPERM) return false;
     // The PID may have been reused since the crash; when /proc can name the
-    // process, only a krdp process counts.
-    QFile comm(QStringLiteral("/proc/%1/comm").arg(pid));
-    if (comm.open(QIODevice::ReadOnly)) {
-        const QByteArray name = comm.readAll().trimmed();
-        return name.isEmpty() || name.startsWith("krdp");
-    }
-    return true;
+    // process, only one of our own server processes counts.
+    const std::optional<QByteArray> name = readName ? readName(pid) : std::nullopt;
+    if (!name || name->isEmpty()) return true;
+    return isOurProcessName(*name);
 }
 
 OutputRestoreJournal::ReplayResult OutputRestoreJournal::replay(const Read &read, const Apply &apply, const Alive &alive,
