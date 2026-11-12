@@ -263,41 +263,50 @@ private:
         // (and reading our own selection would ask this thread to serve itself): never offered back to the client.
         if (m_backend.ownsUriList && m_backend.ownsUriList()) {
             qCDebug(hostClipboardLog) << "host clipboard changed: our own staged files coming back, not offered";
+            withdrawFileOffer();
             return;
         }
-        // OPT-078: a copy of files is announced as files, alone (a file manager adds the paths as text; a client gets the files).
-        // Nothing is read from the files here: only the list of paths, which the offer's snapshot is taken from when the client pastes.
-        if (m_policy.filesHostToClient && m_backend.hasUriList && m_backend.readUriList && m_backend.hasUriList()) {
+        // OPT-078 echo guard: files in our own staging folder are the client's files, whoever owns the clipboard now (a clipboard manager or
+        // KDE Connect can re-own the list we wrote). Found by path, under the folder's lexical and canonical name (the cache directory may
+        // be a symlink and a third party may report either), and in every format: whatever the file policy says, staged paths are never
+        // announced, neither as files nor as the text a file manager adds beside them. Only the list of paths is read, never the files.
+        const QString cacheDir = m_backend.cacheDir ? m_backend.cacheDir() : QString();
+        QList<QByteArray> paths;
+        quint32 refused = 0;
+        if (m_backend.hasUriList && m_backend.readUriList && m_backend.hasUriList()) {
             const auto parsed = HostFiles::parseUriList(m_backend.readUriList());
-            // OPT-078 echo guard: files in our own staging folder are the client's files, whoever owns the clipboard now (a clipboard
-            // manager or KDE Connect can re-own the list we wrote). Found by path, they are never offered back; a mixed list offers the rest.
-            const QString cacheDir = m_backend.cacheDir ? m_backend.cacheDir() : QString();
-            const QByteArray stagingRoot = HostFiles::stagingRoot(cacheDir);
-            QList<QByteArray> paths;
+            refused = quint32(parsed.refused);
+            const QList<QByteArray> stagingRoots = HostFiles::stagingRootsFor(cacheDir);
             for (const auto &path : parsed.paths) {
-                if (!HostFiles::isUnderRoot(path, stagingRoot)) paths.append(path);
+                if (!HostFiles::isUnderAnyRoot(path, stagingRoots)) paths.append(path);
             }
             const int staged = int(parsed.paths.size() - paths.size());
             if (staged > 0) {
                 qCDebug(hostClipboardLog) << "host clipboard changed: staged files in the list, not offered" << staged;
-                if (paths.isEmpty()) {
-                    return; // all ours: not even their names as text (a file manager or KDE Connect adds them) go to the client
+                // All ours, or files are not offered at all here: nothing of this selection goes to the client (a mixed list is offered as files,
+                // below, only the part that is not staged, and only when the file policy allows it).
+                if (paths.isEmpty() || !m_policy.filesHostToClient) {
+                    withdrawFileOffer();
+                    return;
                 }
             }
-            if (!paths.isEmpty()) {
-                m_files.setRefusedRoots(HostFiles::refusedRootsFor(cacheDir)); // second line of defence: the walk refuses the folder too
-                ++m_offerSeq;
-                m_files.registerOffer(m_offerSeq, paths);
-                // Counts only (OPT-078): never a path.
-                qInfo().nospace() << "Clipboard: host copied files items=" << paths.size() << " refused=" << parsed.refused;
-                m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, ConsoleWorkerWire::ClipboardOfferFiles}));
-                return;
-            }
+        }
+        // OPT-078: a copy of files is announced as files, alone (a file manager adds the paths as text; a client gets the files).
+        // Nothing is read from the files here: only the list of paths, which the offer's snapshot is taken from when the client pastes.
+        if (m_policy.filesHostToClient && !paths.isEmpty()) {
+            m_files.setRefusedRoots(HostFiles::refusedRootsFor(cacheDir)); // second line of defence: the walk refuses the folder too
+            ++m_offerSeq;
+            m_files.registerOffer(m_offerSeq, paths);
+            // Counts only (OPT-078): never a path.
+            qInfo().nospace() << "Clipboard: host copied files items=" << paths.size() << " refused=" << refused;
+            m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, ConsoleWorkerWire::ClipboardOfferFiles}));
+            return;
         }
         const bool hasText = m_backend.hasText();
         const bool hasImage = m_backend.hasImage && m_backend.hasImage();
         const bool hasHtml = m_backend.hasHtml && m_backend.readHtml && m_backend.hasHtml();
         if (!hasText && !hasImage && !hasHtml) {
+            withdrawFileOffer(); // the host's selection holds nothing we offer: an earlier file offer is stale
             return;
         }
         // OPT-077: formats from which formats exist (never their contents): rich HTML goes with its text and drops a picture;
@@ -308,6 +317,7 @@ private:
         if (choice.image) flags |= ConsoleWorkerWire::ClipboardOfferImage;
         if (choice.html) flags |= ConsoleWorkerWire::ClipboardOfferHtml;
         if (!flags) {
+            withdrawFileOffer();
             return;
         }
         // Only just after a write of ours is the content read, to tell an asynchronous echo from a new copy.
@@ -327,12 +337,27 @@ private:
         }
         if (!flags) {
             qCDebug(hostClipboardLog) << "host clipboard changed: our own write coming back, not offered";
+            withdrawFileOffer();
             return;
         }
         qCDebug(hostClipboardLog) << "host clipboard changed: offering to the client, text" << bool(flags & ConsoleWorkerWire::ClipboardOfferText) << "html" << bool(flags & ConsoleWorkerWire::ClipboardOfferHtml)
                                   << "image" << bool(flags & ConsoleWorkerWire::ClipboardOfferImage) << "offer" << (m_offerSeq + 1);
         m_files.registerOffer(++m_offerSeq, {}); // the files of an earlier copy are no longer the current offer (a lock may keep them)
         m_send(ConsoleWorkerWire::frame(ConsoleWorkerWire::ClipboardOffer{m_offerSeq, flags}));
+    }
+
+    /**
+     * The host's selection changed to something that is not announced (the client's own staged files, our own write coming back, nothing we
+     * offer): a file offer still standing from an earlier host copy no longer describes the clipboard, so a paste of it must not be served.
+     * The offer is replaced by an empty one, exactly as a text copy replaces it. The client is not told (a ClipboardOffer without a format is
+     * not a valid record of the wire, which stays at 22): its next paste of the stale files is answered Gone, and it forgets them at its
+     * next announcement.
+     */
+    void withdrawFileOffer()
+    {
+        if (!m_files.currentOfferHasFiles()) return;
+        qCDebug(hostClipboardLog) << "host clipboard changed: the earlier file offer" << m_offerSeq << "is withdrawn";
+        m_files.registerOffer(++m_offerSeq, {});
     }
 
     /// The host copy is our own write coming back when it holds the same pixels. The bytes can differ: KSystemClipboard

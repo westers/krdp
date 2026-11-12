@@ -446,6 +446,17 @@ private Q_SLOTS:
         QVERIFY(!isUnderRoot("/home/u/.cache/krdp-clipx", root));
         QVERIFY(!isUnderRoot("/home/u/a", QByteArray()));
         QVERIFY(stagingRoot(QString()).isEmpty());
+        // REVIEW-S5: the roots under both names, and the any-root check the host clipboard's offer uses
+        QVERIFY(stagingRootsFor(QString()).isEmpty());
+        QCOMPARE(stagingRootsFor(QStringLiteral("/nonexistent-cache/")), (QList<QByteArray>{"/nonexistent-cache/krdp-clip"})); // no canonical name: just the lexical one
+        const QList<QByteArray> both = stagingRootsFor(other.filePath(QStringLiteral("link")));
+        QCOMPARE(both.size(), 2);
+        QVERIFY(isUnderAnyRoot(QFile::encodeName(cache.filePath(QStringLiteral("krdp-clip/c-1/1/a"))), both)); // the canonical name
+        QVERIFY(isUnderAnyRoot(QFile::encodeName(other.filePath(QStringLiteral("link/krdp-clip/c-1/1/a"))), both)); // the link's name
+        QVERIFY(!isUnderAnyRoot(QFile::encodeName(cache.filePath(QStringLiteral("krdp-clip-other/a"))), both));
+        QVERIFY(!isUnderAnyRoot("/home/u/a", {}));
+        QVERIFY(refusedRootsFor(other.filePath(QStringLiteral("link"))).mid(0, 3) == (QList<QByteArray>{"/proc", "/sys", "/dev"}));
+        QCOMPARE(refusedRootsFor(other.filePath(QStringLiteral("link"))).mid(3), both);
     }
 
     void aSelectionOfOnlyUnreadableThingsIsEmpty()

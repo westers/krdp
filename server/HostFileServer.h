@@ -254,6 +254,12 @@ public:
         return it != m_offers.end() && it->second.snapshot;
     }
     quint64 currentSeq() const { return m_current; }
+    /// The current offer is a file copy (not a text copy, which makes the current offer one without files, and not nothing).
+    bool currentOfferHasFiles() const
+    {
+        const auto it = m_offers.find(m_current);
+        return it != m_offers.end() && !it->second.paths.isEmpty();
+    }
     /// Test seam: waits until the background thread is idle (results still need the event loop to be delivered).
     bool waitForIdle(int ms) { return m_pool.waitForDone(ms); }
 
