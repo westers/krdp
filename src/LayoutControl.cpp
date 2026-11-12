@@ -510,6 +510,9 @@ QJsonObject capabilitiesRecord(const ChannelCapabilities &capabilities)
             filesGroup.insert(QStringLiteral("window"),
                               QJsonObject{{QStringLiteral("maxBytes"), qint64(ClipboardFileLimits::NegotiatedWindow.maxBytes)},
                                           {QStringLiteral("maxCount"), ClipboardFileLimits::NegotiatedWindow.maxCount}});
+            // GAP-G3 (additive): this server never offers the client's own staged files back to it, by path, in every format and whatever the file
+            // policy says (the guard on the staging root is unconditional), so a client needs no echo heuristic of its own.
+            filesGroup.insert(QStringLiteral("hostNeverEchoes"), true);
             group.insert(QStringLiteral("files"), filesGroup);
         }
         record.insert(QStringLiteral("clipboard"), group);

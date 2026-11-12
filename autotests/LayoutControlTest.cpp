@@ -169,7 +169,9 @@ private Q_SLOTS:
                  (QJsonObject{{QStringLiteral("hostToClient"), true}, {QStringLiteral("clientToHost"), false}, {QStringLiteral("maxMode"), QStringLiteral("auto")},
                               {QStringLiteral("huge"), true}, {QStringLiteral("transfer"), true},
                               // OPT-078 small files: the in-flight window this host serves and requests under (additive)
-                              {QStringLiteral("window"), QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 128}}}}));
+                              {QStringLiteral("window"), QJsonObject{{QStringLiteral("maxBytes"), 4194304}, {QStringLiteral("maxCount"), 128}}},
+                              // GAP-G3: the host never offers the client's staged files back (additive)
+                              {QStringLiteral("hostNeverEchoes"), true}}));
         // the rest of the group is what OPT-077 sent
         group.remove(QStringLiteral("files"));
         caps.clipboard->files.reset();

@@ -4270,7 +4270,8 @@ private Q_SLOTS:
             expected.insert(u"files"_s, QJsonObject{{u"hostToClient"_s, both || direction == ConsoleClipboardPolicy::Direction::HostToClient},
                                                     {u"clientToHost"_s, both || direction == ConsoleClipboardPolicy::Direction::ClientToHost},
                                                     {u"maxMode"_s, u"auto"_s}, {u"huge"_s, true}, {u"transfer"_s, true},
-                                                    {u"window"_s, QJsonObject{{u"maxBytes"_s, 4194304}, {u"maxCount"_s, 128}}}}); // OPT-078 small files
+                                                    {u"window"_s, QJsonObject{{u"maxBytes"_s, 4194304}, {u"maxCount"_s, 128}}}, // OPT-078 small files
+                                                    {u"hostNeverEchoes"_s, true}}); // GAP-G3: staged files are never offered back
             QCOMPARE(caps.value(u"clipboard"_s).toObject(), expected);
         }
     }
