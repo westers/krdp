@@ -1360,3 +1360,8 @@ add_executable(WorkerSocketBindingTest WorkerSocketBindingTest.cpp ${CMAKE_SOURC
 target_include_directories(WorkerSocketBindingTest PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/server)
 target_link_libraries(WorkerSocketBindingTest PRIVATE Qt6::Test Qt6::Core Qt6::Gui Qt6::Network)
 add_test(NAME WorkerSocketBindingTest COMMAND WorkerSocketBindingTest)
+
+# REVIEW-P1: the files hand-copied between this repo and krdp-client must stay equal (see docs/shared-headers.md).
+# Set KRDP_CLIENT_SRC to the client checkout; exit 77 (client repo absent) is a skip.
+add_test(NAME SharedHeadersDriftCheck COMMAND ${CMAKE_SOURCE_DIR}/scripts/check-shared-headers.sh)
+set_tests_properties(SharedHeadersDriftCheck PROPERTIES SKIP_RETURN_CODE 77)
