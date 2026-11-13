@@ -866,11 +866,104 @@ private Q_SLOTS:
             QCOMPARE(p.rateBytesPerSecond(), cut);
             run(p, c, in, 30);
             QCOMPARE(p.rateBytesPerSecond(), FloorBytesPerSecond);
-            run(p, c, Inputs{}, 1); // pressure over: only the legacy 5% probe is left
-            QVERIFY(qAbs(p.rateBytesPerSecond() - FloorBytesPerSecond * 1.05) < 1.0);
+            run(p, c, Inputs{}, 1); // pressure over: slow start RECOVERS, up to half the rate the signal happened at (and not past it)
+            QVERIFY(p.inSlowStart());
             p.noteDelivered(c.now, 1 << 20);
-            QVERIFY(qAbs(p.rateBytesPerSecond() - FloorBytesPerSecond * 1.05) < 1.0);
+            QCOMPARE(p.rateBytesPerSecond(), grown * SlowStartRecoveryShare);
+            QVERIFY(!p.inSlowStart()); // threshold reached: the legacy rules go on
+            const double back = p.rateBytesPerSecond();
+            p.noteDelivered(c.now, 1 << 20);
+            QCOMPARE(p.rateBytesPerSecond(), back);
         }
+    }
+    void aSecondSignalHalvesTheRecoveryThresholdAndAGapForgetsIt()
+    {
+        Clock0 c;
+        FileTransferPacer p;
+        p.reset(c.now);
+        run(p, c, Inputs{}, 1);
+        p.noteDelivered(c.now, 4 << 20);
+        const double grown = p.rateBytesPerSecond();
+        Inputs in;
+        in.congested = true;
+        run(p, c, in, 20); // the first signal: cut to the floor
+        run(p, c, Inputs{}, 1); // over: recovering
+        QVERIFY(p.inSlowStart());
+        p.noteDelivered(c.now, 100'000); // part of the way (never past grown / 2)
+        const double part = p.rateBytesPerSecond();
+        QVERIFY(part > FloorBytesPerSecond && part < grown * SlowStartRecoveryShare);
+        run(p, c, in, 1); // a second signal on the way back: the threshold falls to half of where it happened (but not below the start rate)
+        run(p, c, in, 20);
+        run(p, c, Inputs{}, 1);
+        p.noteDelivered(c.now, 4 << 20);
+        QVERIFY(p.rateBytesPerSecond() <= std::max(part * SlowStartRecoveryShare, StartBytesPerSecond) * 1.0001);
+        QVERIFY(p.rateBytesPerSecond() >= StartBytesPerSecond);
+        // a gap of more than SlowStartIdleGap between ticks forgets it: only the legacy probe from then on
+        FileTransferPacer q;
+        q.reset(c.now);
+        run(q, c, Inputs{}, 1);
+        q.noteDelivered(c.now, 4 << 20);
+        run(q, c, in, 20);
+        c.advance(3s);
+        q.tick(c.now, Inputs{});
+        QVERIFY(!q.inSlowStart());
+        const double after = q.rateBytesPerSecond();
+        q.noteDelivered(c.now, 4 << 20);
+        QCOMPARE(q.rateBytesPerSecond(), after);
+        // Balanced and Unlimited never recover this way
+        Policy balanced;
+        balanced.balanced = true;
+        FileTransferPacer b(balanced);
+        b.reset(c.now);
+        run(b, c, in, 20);
+        run(b, c, Inputs{}, 1);
+        QVERIFY(!b.inSlowStart());
+    }
+    void afterTheFirstSignalASlowLinkComesBackByTheThresholdNotByTheOldReprobe()
+    {
+        // 20 Mbit/s, 100 ms round trip, the requester sees the bottleneck queue (a congested verdict stands for it): the first signal cuts the rate to the floor; the old
+        // re-probe from there (5% per 100 ms) took 22 s for 5 MiB where the old ramp, which never overshot, needed 7 s
+        Outcome results[2];
+        for (const bool reports : {false, true}) {
+            Clock0 c;
+            FileTransferPacer p;
+            p.reset(c.now);
+            Pipe pipe;
+            pipe.rttSeconds = 0.1;
+            pipe.linkBytesPerSecond = 2.5e6;
+            pipe.feedQueue = true;
+            pipe.reportDelivered = reports;
+            results[reports ? 1 : 0] = simulate(p, c, pipe, 5 * 1024 * 1024, 40);
+        }
+        QVERIFY(results[0].secondsToGoal > 0 && results[1].secondsToGoal > 0);
+        QVERIFY2(results[1].secondsToGoal < results[0].secondsToGoal, qPrintable(QStringLiteral("%1 s against the old ramp's %2 s").arg(results[1].secondsToGoal).arg(results[0].secondsToGoal)));
+        QVERIFY(results[1].secondsToShare > 0 && results[1].secondsToShare <= results[0].secondsToShare || results[0].secondsToShare < 0);
+    }
+    void aLaterSignalInARunningTransferRecoversTheSameWay()
+    {
+        Clock0 c;
+        FileTransferPacer p;
+        p.reset(c.now);
+        run(p, c, Inputs{}, 1);
+        p.noteDelivered(c.now, 4 << 20);
+        run(p, c, Inputs{}, 1);
+        // slow start ended by reaching the cap of 10 Gbit/s stays out of this: use the keep-up check to end it, then run on under the legacy rule
+        const double legacy = p.rateBytesPerSecond();
+        c.advance(100ms);
+        p.noteDelivered(c.now, 10); // nothing delivered: slow start ends
+        p.tick(c.now, Inputs{});
+        QVERIFY(!p.inSlowStart());
+        run(p, c, Inputs{}, 20); // the legacy probe goes on growing
+        const double before = p.rateBytesPerSecond();
+        QVERIFY(before > legacy);
+        Inputs in;
+        in.videoBacklog = true;
+        run(p, c, in, 30); // a signal: the old cut to the floor
+        QCOMPARE(p.rateBytesPerSecond(), FloorBytesPerSecond);
+        run(p, c, Inputs{}, 1);
+        QVERIFY(p.inSlowStart()); // recovery by slow start, up to half of where the signal happened
+        p.noteDelivered(c.now, 1 << 30);
+        QVERIFY(qAbs(p.rateBytesPerSecond() / before - SlowStartRecoveryShare) < 0.05);
     }
     void aGrowingSendQueueHoldsSlowStartBeforeThePressureThreshold()
     {

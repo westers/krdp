@@ -42,6 +42,11 @@ namespace KRdp::ClipboardFilePacing
  * SlowStartKeepUp x the rate the interval began with (the link or the peer limits, not R: that interval's growth is undone); a gap of SlowStartIdleGap between
  * ticks (no transfer was running: a rate established earlier in the connection is kept as it is). Without noteDelivered() calls (a peer that never answers, or an
  * owner that does not report) nothing of this happens and R follows the legacy rules only.
+ * RECOVERY: the cut at a congestion signal is the old one (halving per tick down to the floor), but the rate it was cut from is remembered: SlowStartRecoveryShare of it
+ * becomes a threshold, and once the pressure is over slow start runs again (driven by noteDelivered(), so only for owners that report), from wherever the cut left R, up
+ * to that threshold (never past it); then the legacy 5% rule goes on. A second signal before the threshold is reached halves the threshold (below the rate it happened
+ * at, and not below the start rate). Without this the overshoot slow start can make on a link that is already full costs more than the ramp saved: the old
+ * re-probe from the floor needs 5% per tick (measured on a 100 ms / 20 Mbit link: 5 MiB in 22 s, the old ramp 7 s). A gap of SlowStartIdleGap forgets the threshold.
  *
  * Derived: window W = clamp(ceil(R * 0.1 s / 256 KiB), 1, 16) requests (4 for a client without
  * KRDPCTL); slice = clamp(R * 50 ms, 16 KiB, 64 KiB); a token bucket with R * 50 ms burst (a slice
@@ -65,6 +70,7 @@ constexpr double SmoothingPerTick = 0.05; ///< 100 ms / 2 s
 constexpr int MaxTicksPerCall = 10;
 constexpr double SlowStartGain = 1.0; ///< R grows by this x delivered bytes / WindowSeconds (the window grows by gain x the bytes delivered)
 constexpr double SlowStartSeedShare = 0.25; ///< a known capacity seeds R at this share of the target
+constexpr double SlowStartRecoveryShare = 0.5; ///< after a congestion signal slow start returns up to this share of the rate it happened at
 constexpr double SlowStartKeepUp = 0.5; ///< a tick whose delivered rate is below this x the rate it began with ends slow start
 constexpr double SlowStartMaxBytesPerSecond = 1.25e9; ///< slow start stops here (10 Gbit/s)
 constexpr qint64 SlowStartHoldQueueBytes = PressureQueueBytes / 2; ///< from this send queue on, slow start stops growing (before the pressure threshold)
@@ -199,6 +205,7 @@ public:
             const auto elapsed = now - *m_lastTick;
             if (elapsed > SlowStartIdleGap) {
                 m_slowStart = false; // nothing ran for a while: a rate established earlier is kept as it is
+                m_recovering = false;
             }
             steps = int(std::min<long long>(elapsed / Tick, MaxTicksPerCall));
             if (steps <= 0) {
@@ -228,12 +235,16 @@ public:
             return;
         }
         refill(now);
-        const double limit = std::min({hardMax(), m_slowCeiling, SlowStartMaxBytesPerSecond});
+        const double limit = std::min({hardMax(), m_slowCeiling, SlowStartMaxBytesPerSecond, m_recovering ? m_ssthresh : 1e18});
         if (m_rate < limit) {
             m_rate = std::min(limit, m_rate + SlowStartGain * double(bytes) / WindowSeconds);
         }
         if (m_rate >= SlowStartMaxBytesPerSecond) {
             m_slowStart = false; // 10 Gbit/s: nothing real carries more; the legacy rules go on from here
+        }
+        if (m_recovering && m_rate >= m_ssthresh) {
+            m_slowStart = false; // back at the threshold: the legacy rules go on from here
+            m_recovering = false;
         }
     }
 
@@ -343,13 +354,19 @@ public:
     }
 
 private:
+    bool policyAllowsSlowStart() const
+    {
+        return !m_policy.unlimited && !m_policy.balanced;
+    }
     bool slowStartActive() const
     {
-        return m_slowStart && !m_policy.unlimited && !m_policy.balanced;
+        return m_slowStart && policyAllowsSlowStart();
     }
     void resetSlowStart()
     {
         m_slowStart = true;
+        m_recovering = false;
+        m_ssthresh = 0;
         m_queueBuilding = false;
         m_slowCeiling = 1e18;
         m_delivered = 0;
@@ -393,6 +410,7 @@ private:
             m_otherKbps = m_haveOther ? m_otherKbps + (double(*in.otherKbps) - m_otherKbps) * SmoothingPerTick : double(*in.otherKbps);
             m_haveOther = true;
         }
+        const bool pressureBefore = m_pressure;
         m_pressure = isUnderPressure(in);
         m_queueBuilding = in.sendQueueBytes && *in.sendQueueBytes >= SlowStartHoldQueueBytes;
         if (m_policy.unlimited) {
@@ -415,10 +433,21 @@ private:
             target = std::min(target, capacity * 0.5);
         }
         target = std::min(hardMax(), std::max(FloorBytesPerSecond, target));
-        if (m_slowStart && slowStartActive()) {
+        if (policyAllowsSlowStart()) {
             if (m_pressure) {
+                if (!pressureBefore) {
+                    // the rising edge of a signal: the rate it happened at (or the threshold, if that is lower: a second signal while recovering), halved, is the threshold to come back to
+                    m_ssthresh = std::max(std::min(m_rate, m_recovering ? m_ssthresh : 1e18) * SlowStartRecoveryShare, StartBytesPerSecond);
+                    m_recovering = true;
+                }
                 m_slowStart = false; // the first congestion signal ends it: the rate is cut below exactly as it always was
-            } else if (known) {
+            } else if (m_recovering && !m_slowStart) {
+                if (m_rate >= m_ssthresh) {
+                    m_recovering = false;
+                } else {
+                    m_slowStart = true; // the pressure is over: slow start again, up to the threshold
+                }
+            } else if (m_slowStart && known && !m_recovering) {
                 m_rate = std::max(m_rate, std::min(target, SlowStartSeedShare * target)); // seeded from what the link is known to carry
             }
         }
@@ -443,6 +472,8 @@ private:
     bool m_haveOther = false;
     bool m_pressure = false;
     bool m_slowStart = true;
+    bool m_recovering = false; ///< a congestion signal cut the rate while slow start ran: slow start returns up to m_ssthresh once the pressure is over
+    double m_ssthresh = 0; ///< bytes/s, valid while m_recovering
     bool m_queueBuilding = false; ///< the send queue is over SlowStartHoldQueueBytes: slow start holds (the link is filling up)
     double m_slowCeiling = 1e18; ///< the target of the last tick when the capacity is known (slow start never passes it)
     double m_delivered = 0; ///< bytes delivered since the last tick() call
