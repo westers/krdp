@@ -32,6 +32,17 @@ namespace KRdp::ClipboardFilePacing
  * lowers the target; the floor holds beneath it, except that a cap below the floor wins. Unlimited
  * has no token bucket (window 16 and the send-queue rule remain).
  *
+ * Start-up (PACER ramp): a fresh pacer starts in SLOW START (Auto, Cap and a stock client; never Balanced or Unlimited). The owner reports the bytes that were
+ * delivered (noteDelivered(): a valid answer arrived, or a response was written behind the head-of-line bound) and each delivery raises R by SlowStartGain x bytes /
+ * WindowSeconds, i.e. the window (R x 0.1 s) grows by the bytes just delivered: ack-clocked like TCP slow start, so it follows the round-trip time of the link and
+ * the speed of the peer instead of a fixed 5% per tick (the 5% probe needed about 6 s for the first 5 MiB on a loopback; slow start needs about half a second). It
+ * holds while the send queue is over SlowStartHoldQueueBytes (the link is filling up) and ends, with the legacy rules above taking over from the rate it reached, at
+ * the first of: pressure (the cut is then exactly the old one); the target when the capacity is known (R never passes it, and a known capacity SEEDS R at
+ * SlowStartSeedShare of the target at once); the cap or the host owner's ceiling; SlowStartMaxBytesPerSecond; a tick that saw bytes delivered but fewer than
+ * SlowStartKeepUp x the rate the interval began with (the link or the peer limits, not R: that interval's growth is undone); a gap of SlowStartIdleGap between
+ * ticks (no transfer was running: a rate established earlier in the connection is kept as it is). Without noteDelivered() calls (a peer that never answers, or an
+ * owner that does not report) nothing of this happens and R follows the legacy rules only.
+ *
  * Derived: window W = clamp(ceil(R * 0.1 s / 256 KiB), 1, 16) requests (4 for a client without
  * KRDPCTL); slice = clamp(R * 50 ms, 16 KiB, 64 KiB); a token bucket with R * 50 ms burst (a slice
  * may overdraw it: the average stays R); a slice is refused while the socket holds more than
@@ -52,6 +63,12 @@ constexpr double IncreaseFraction = 0.05;
 constexpr double ActiveShare = 0.5;
 constexpr double SmoothingPerTick = 0.05; ///< 100 ms / 2 s
 constexpr int MaxTicksPerCall = 10;
+constexpr double SlowStartGain = 1.0; ///< R grows by this x delivered bytes / WindowSeconds (the window grows by gain x the bytes delivered)
+constexpr double SlowStartSeedShare = 0.25; ///< a known capacity seeds R at this share of the target
+constexpr double SlowStartKeepUp = 0.5; ///< a tick whose delivered rate is below this x the rate it began with ends slow start
+constexpr double SlowStartMaxBytesPerSecond = 1.25e9; ///< slow start stops here (10 Gbit/s)
+constexpr qint64 SlowStartHoldQueueBytes = PressureQueueBytes / 2; ///< from this send queue on, slow start stops growing (before the pressure threshold)
+constexpr auto SlowStartIdleGap = std::chrono::seconds(2);
 
 enum class RequestedMode { Auto, Balanced, FixedCap, Unlimited };
 
@@ -160,10 +177,11 @@ public:
         return m_policy;
     }
 
-    /// A transfer starts: back to the start rate with an empty bucket.
+    /// A transfer starts: back to the start rate with an empty bucket, in slow start.
     void reset(Clock::time_point now)
     {
         m_rate = startRate();
+        resetSlowStart();
         m_balance = 0;
         m_lastRefill = now;
         m_lastTick.reset();
@@ -179,6 +197,9 @@ public:
         int steps = 1;
         if (m_lastTick) {
             const auto elapsed = now - *m_lastTick;
+            if (elapsed > SlowStartIdleGap) {
+                m_slowStart = false; // nothing ran for a while: a rate established earlier is kept as it is
+            }
             steps = int(std::min<long long>(elapsed / Tick, MaxTicksPerCall));
             if (steps <= 0) {
                 return;
@@ -193,6 +214,33 @@ public:
         for (int i = 0; i < steps; ++i) {
             step(inputs);
         }
+        checkKeepUp(steps);
+    }
+
+    /**
+     * \a bytes of file data were delivered (a response arrived, or was written behind the head-of-line bound). In slow start this raises the rate by
+     * SlowStartGain x bytes / WindowSeconds, never past the target (known capacity), the cap or the ceiling; otherwise it only feeds the keep-up check.
+     */
+    void noteDelivered(Clock::time_point now, quint64 bytes)
+    {
+        m_delivered += double(bytes);
+        if (!slowStartActive() || m_pressure || m_queueBuilding) {
+            return;
+        }
+        refill(now);
+        const double limit = std::min({hardMax(), m_slowCeiling, SlowStartMaxBytesPerSecond});
+        if (m_rate < limit) {
+            m_rate = std::min(limit, m_rate + SlowStartGain * double(bytes) / WindowSeconds);
+        }
+        if (m_rate >= SlowStartMaxBytesPerSecond) {
+            m_slowStart = false; // 10 Gbit/s: nothing real carries more; the legacy rules go on from here
+        }
+    }
+
+    /// Whether the rate is still being found by slow start (never for Balanced or Unlimited).
+    bool inSlowStart() const
+    {
+        return slowStartActive();
     }
 
     /// Allowed file rate in bytes/s (meaningless when unlimited()).
@@ -295,6 +343,33 @@ public:
     }
 
 private:
+    bool slowStartActive() const
+    {
+        return m_slowStart && !m_policy.unlimited && !m_policy.balanced;
+    }
+    void resetSlowStart()
+    {
+        m_slowStart = true;
+        m_queueBuilding = false;
+        m_slowCeiling = 1e18;
+        m_delivered = 0;
+        m_rateAtTick = 0;
+        m_haveKeepUp = false;
+    }
+    /// Once per tick() call: did the bytes delivered keep up with the rate the interval began with? (The first interval only sets the baseline.)
+    void checkKeepUp(int steps)
+    {
+        if (slowStartActive() && m_haveKeepUp && m_delivered > 0) {
+            const double delivered = m_delivered / (double(steps) * std::chrono::duration<double>(Tick).count());
+            if (delivered < SlowStartKeepUp * m_rateAtTick) {
+                m_slowStart = false; // the link or the peer limits, not our rate: undo this interval's growth and carry on with the legacy rules
+                m_rate = std::min(m_rate, std::max(m_rateAtTick, FloorBytesPerSecond));
+            }
+        }
+        m_rateAtTick = m_rate;
+        m_delivered = 0;
+        m_haveKeepUp = true;
+    }
     double hardMax() const
     {
         return m_policy.capBytesPerSecond ? double(*m_policy.capBytesPerSecond) : 1e18;
@@ -319,6 +394,7 @@ private:
             m_haveOther = true;
         }
         m_pressure = isUnderPressure(in);
+        m_queueBuilding = in.sendQueueBytes && *in.sendQueueBytes >= SlowStartHoldQueueBytes;
         if (m_policy.unlimited) {
             return;
         }
@@ -339,11 +415,22 @@ private:
             target = std::min(target, capacity * 0.5);
         }
         target = std::min(hardMax(), std::max(FloorBytesPerSecond, target));
+        if (m_slowStart && slowStartActive()) {
+            if (m_pressure) {
+                m_slowStart = false; // the first congestion signal ends it: the rate is cut below exactly as it always was
+            } else if (known) {
+                m_rate = std::max(m_rate, std::min(target, SlowStartSeedShare * target)); // seeded from what the link is known to carry
+            }
+        }
+        m_slowCeiling = known && !m_pressure ? target : 1e18;
         if (m_rate > target) {
             m_rate = std::max(target, m_rate / 2.0);
         } else if (m_rate < target) {
             const double increase = std::max(IncreaseFraction * (known ? base : m_rate), 1000.0);
             m_rate = std::min(target, m_rate + increase);
+        }
+        if (m_slowStart && known && !m_pressure && m_rate >= target) {
+            m_slowStart = false; // reached what the link is known to carry
         }
     }
 
@@ -355,5 +442,11 @@ private:
     double m_otherKbps = 0;
     bool m_haveOther = false;
     bool m_pressure = false;
+    bool m_slowStart = true;
+    bool m_queueBuilding = false; ///< the send queue is over SlowStartHoldQueueBytes: slow start holds (the link is filling up)
+    double m_slowCeiling = 1e18; ///< the target of the last tick when the capacity is known (slow start never passes it)
+    double m_delivered = 0; ///< bytes delivered since the last tick() call
+    double m_rateAtTick = 0; ///< R when the last tick() call finished (the interval's baseline)
+    bool m_haveKeepUp = false;
 };
 }
