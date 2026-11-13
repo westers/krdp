@@ -301,6 +301,7 @@ public:
             it = m_items.erase(it);
             m_validator.complete(stream);
             m_pacer.consume(now, length);
+            m_pacer.noteDelivered(now, length); // PACER ramp: written behind the head-of-line bound, so the socket (not the bucket) clocks slow start
             ++m_counters.ranges;
             m_counters.bytes += length;
             m_recent.append({now, length});

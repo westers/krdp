@@ -605,6 +605,33 @@ private Q_SLOTS:
         const double sequential = one.run(files);
         QVERIFY2(sequential > 199.0 && sequential < 202.0, qPrintable(QString::number(sequential)));
     }
+    // PACER ramp: an Auto requester that knows nothing about the link finds its rate from the answers it receives (slow start), not from a 5% per tick timer.
+    void anAutoRequesterWithNoCapacityEvidenceReachesFiveMiBInUnderTwoSeconds()
+    {
+        for (const auto rtt : {1ms, 20ms, 100ms}) {
+            Sim sim(ClipboardFilePacing::Policy{}, ClipboardFileLimits::NegotiatedWindow, rtt);
+            sim.inputs = {}; // no capacity, no queue: the probe
+            sim.step = 1ms;
+            const double seconds = sim.run({{0, 5ULL * 1024 * 1024}}, 30);
+            QCOMPARE(int(sim.h.ends.first().first), int(EndReason::Done));
+            QCOMPARE(sim.h.fetcher->counters().bytesAcked, quint64(5) * 1024 * 1024);
+            QVERIFY2(seconds < 2.0, qPrintable(QStringLiteral("rtt %1 ms: %2 s").arg(rtt.count()).arg(seconds)));
+            QVERIFY(sim.h.fetcher->pacer().rateBytesPerSecond() > 1e6); // the legacy ramp was still at 130 kB/s after a second
+        }
+    }
+    void aFailedOrShortAnswerDoesNotClockSlowStart()
+    {
+        Harness h(ClipboardFilePacing::Policy{});
+        h.start({{0, 100'000}});
+        QCOMPARE(h.requests.size(), 1);
+        const double before = h.fetcher->pacer().rateBytesPerSecond();
+        h.fetcher->onResponse(h.requests.at(0).streamId, true, QByteArray(10, 'x'), h.now); // short: the transfer ends
+        QCOMPARE(h.fetcher->pacer().rateBytesPerSecond(), before);
+        Harness g(ClipboardFilePacing::Policy{});
+        g.start({{0, 100'000}});
+        g.fetcher->onResponse(g.requests.at(0).streamId, false, {}, g.now);
+        QCOMPARE(g.fetcher->pacer().rateBytesPerSecond(), before);
+    }
     void atZeroRoundTripBothFinishAtOnce()
     {
         for (const auto &window : {ClipboardFileLimits::LegacyWindow, ClipboardFileLimits::NegotiatedWindow}) {

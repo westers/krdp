@@ -10,6 +10,8 @@
 
 #include "ConsoleClipboardPolicy.h"
 
+#include <QElapsedTimer>
+
 using namespace LoopbackHarness;
 using namespace Qt::StringLiterals;
 
@@ -84,6 +86,26 @@ private Q_SLOTS:
         QCOMPARE(run.ended, 0);
         // the window bounds the reads in flight: never more than the client's four plus the one the pacer was holding
         QVERIFY(!run.board->hostFileTransferActive());
+    }
+
+    // PACER ramp: the FIRST copy on a connection is not limited by the start-up ramp. 5 MiB over loopback took 6.2 s with the fixed 5% per tick probe (2026-11-12 baseline);
+    // slow start is clocked by what is written behind the head-of-line bound, so it is limited by the socket and the disk, not by a timer.
+    void theFirstCopyOfFiveMiBIsNotLimitedByTheRamp()
+    {
+        const QString src = fresh("src_ramp");
+        const QString out = fresh("out_ramp");
+        writeFile(src + u"/five.bin"_s, pattern(5 * 1024 * 1024, 9));
+        Run run;
+        QVERIFY(begin(run, {native(src + u"/five.bin"_s)}, {u"--files-out"_s, out, u"--files-window"_s, u"4"_s}));
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(run.announceFiles());
+        QVERIFY2(run.waitFor(60s, [&run] { return run.log.contains("FILES done") || run.probe.state() != QProcess::Running; }), run.log.constData());
+        const qint64 ms = timer.elapsed();
+        qInfo() << "PACER first copy of 5 MiB over loopback:" << ms << "ms";
+        QVERIFY2(run.log.contains("FILES done files=1 bytes=5242880"), run.log.constData());
+        QCOMPARE(readAt(out + u"/five.bin"_s, 0, 6 * 1024 * 1024), pattern(5 * 1024 * 1024, 9));
+        QVERIFY2(ms < 2500, qPrintable(QStringLiteral("the first copy of 5 MiB took %1 ms").arg(ms)));
     }
 
     void aSecondCopyReplacesTheFirst()

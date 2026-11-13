@@ -242,6 +242,7 @@ public:
         }
         item->state = State::Received;
         item->data = data;
+        m_pacer.noteDelivered(now, quint64(data.size())); // PACER ramp: a valid answer is the acknowledgement that clocks slow start
         deliverReady();
     }
 

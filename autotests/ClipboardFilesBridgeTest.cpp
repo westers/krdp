@@ -356,7 +356,12 @@ private Q_SLOTS:
     {
         Rig rig;
         rig.offerAndServe();
-        // Auto starts at the floor x4 (128 kB/s): one request in flight at a time. The rest wait for the response of the first.
+        // A fixed cap of 128 kB/s (the old Auto start rate; since PACER ramp an Auto copy grows its window with the bytes it sends: the next test): one request in flight
+        // at a time. The rest wait for the response of the first.
+        Clipboard::FileRate slow;
+        slow.mode = ClipboardFilePacing::RequestedMode::FixedCap;
+        slow.capBytesPerSecond = 128'000;
+        rig.clipboard.setFileTransferRequest(slow);
         for (quint32 i = 0; i < 4; ++i) rig.contentsRequest(20 + i, 2, FILECONTENTS_RANGE, quint64(i) * 262144, 262144);
         QTRY_COMPARE(rig.reads.size(), 1);
         QVERIFY(rig.clipboard.hostFileTransferActive());
@@ -378,6 +383,21 @@ private Q_SLOTS:
         QCOMPARE(rig.clipboard.effectiveFilePolicy().unlimited, false); // a ceiling beats unlimited
         QCOMPARE(rig.clipboard.effectiveFilePolicy().capBytesPerSecond, std::optional<quint64>(5'000'000));
         QTRY_VERIFY_WITH_TIMEOUT(rig.sent.contents.size() >= 2, 5000);
+    }
+
+    // PACER ramp: an Auto copy (nothing known about the link) starts at 128 kB/s but grows its window with the bytes it has sent, so the reads in flight go from one to
+    // several after the first response instead of staying at one for seconds.
+    void anAutoCopyGrowsItsWindowWithTheBytesItSends()
+    {
+        Rig rig;
+        rig.offerAndServe();
+        for (quint32 i = 0; i < 4; ++i) rig.contentsRequest(20 + i, 2, FILECONTENTS_RANGE, quint64(i) * 262144, 262144);
+        QTRY_COMPARE(rig.reads.size(), 1);
+        rig.clipboard.provideHostFileRead(20, Clipboard::ReadResult::Ok, QByteArray(262144, 'a'));
+        QTRY_COMPARE(rig.sent.contents.size(), 1);
+        QTRY_VERIFY(rig.reads.size() >= 3); // the 256 KiB that left raised the window: more than the one read of the start rate
+        rig.clipboard.provideHostFileRead(21, Clipboard::ReadResult::Ok, QByteArray(262144, 'b'));
+        QTRY_VERIFY_WITH_TIMEOUT(rig.sent.contents.size() >= 2, 2000); // and the second response is not held back for 2 seconds
     }
 
     void hostileRequestsAreAnsweredFailedAndNeverReachTheWorker()

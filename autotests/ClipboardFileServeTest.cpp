@@ -158,7 +158,10 @@ private Q_SLOTS:
         QCOMPARE(slow.server->pending(), 5);
         slow.answer(30);
         QCOMPARE(slow.responses.size(), 1);
-        QCOMPARE(slow.reads.size(), 2); // the next one is issued as the first leaves
+        // PACER ramp: the 256 KiB that just left were delivered, which grows the window in slow start (it was one request at the start rate, the 5% ramp kept it
+        // at one for 2.5 s): now 2.7 MB/s -> a 270 kB budget -> two more reads go out as the first leaves (the old expectation was one: 2 reads in all)
+        QCOMPARE(slow.server->pacer().window(), 2);
+        QCOMPARE(slow.reads.size(), 3);
         // Unlimited: sixteen at once, never more.
         Rig fast;
         for (quint32 i = 0; i < 16; ++i) fast.request(range(100 + i, 0, 0, 1000));
