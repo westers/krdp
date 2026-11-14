@@ -14,6 +14,12 @@ sh -n "$pi" && sh -n "$po" || fail "maintainer script syntax"
 grep -q '^# BEGIN farside-greeter-setting$' "$pi" || fail "postinst has no greeter setting function"
 grep -q '30-farside-greeter.conf' "$po" || fail "postrm does not remove the greeter drop-in on purge"
 grep -q 'kbuildsycoca6 --noincremental' "$pi" || fail "postinst has no sddm cache rebuild"
+# The per-user unit no longer ships: postinst may only purge its stale state (on upgrade from before 1:0.17.0), never enable it.
+grep -q -- "--user purge app-io.github.westers.farside.server.service" "$pi" || fail "postinst does not purge the removed user unit state"
+grep -q "compare-versions .*lt '1:0.17.0~'" "$pi" || fail "postinst user-unit cleanup is not guarded by the upgrade version"
+if grep -E -- "--user (enable|update-state|was-enabled)" "$pi" | grep -v '^ *#' >/dev/null; then
+    fail "postinst still enables or tracks the removed user unit"
+fi
 if sed -n '/BEGIN farside-greeter-setting/,$p' "$pi" | grep -E 'systemctl[^|;]*(restart|stop)[^|;]*sddm|10-wayland.conf' | grep -v '^ *#' | grep -v echo >/dev/null; then
     fail "postinst restarts sddm or edits 10-wayland.conf"
 fi

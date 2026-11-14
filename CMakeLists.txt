@@ -43,7 +43,7 @@ set(KRDP_BUILD_REVISION "" CACHE STRING "Git short revision shown next to the ve
 if(KRDP_BUILD_REVISION)
     add_compile_definitions(KRDP_BUILD_REVISION="${KRDP_BUILD_REVISION}")
 endif()
-option(KRDP_BUILD_SYSTEM_PACKAGE "Install layout of the krdp system deb (set only by scripts/package-krdp.sh)" OFF)
+option(KRDP_BUILD_SYSTEM_PACKAGE "Install layout of the farside-server system deb (set only by scripts/package-farside.sh)" OFF)
 
 find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Core Quick Gui Network DBus WaylandClient Qml)
 

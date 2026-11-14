@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
 set -eu
 [ "$1" = configure ] || exit 0
+# $2 is the previously configured version (empty on a first install). The loops
+# below reuse the positional parameters, so keep it.
+previous_version=${2:-}
 
 # Copy only. Stock KDE KRDP and the old fork remain recoverable from their own
 # config, certificates and unit drop-ins. This script never starts a service.
@@ -150,10 +153,15 @@ if command -v deb-systemd-helper >/dev/null; then
         fi
         deb-systemd-helper update-state "$2" >/dev/null || true
     done
-    if deb-systemd-helper --quiet --user was-enabled app-org.kde.krdpserver.service; then
-        deb-systemd-helper --user enable app-io.github.westers.farside.server.service >/dev/null || true
+    # The per-user unit app-io.github.westers.farside.server.service no longer ships (the legacy
+    # krdpserver route was removed in 1:0.17.0). Drop the enablement state and the symlinks
+    # deb-systemd-helper recorded for it under /etc/systemd/user and
+    # /var/lib/systemd/deb-systemd-user-helper-enabled. Nothing in any home directory is
+    # touched and no unit is stopped or started. The stock KDE unit
+    # app-org.kde.krdpserver.service belongs to the stock package and is left alone.
+    if [ -n "$previous_version" ] && dpkg --compare-versions "$previous_version" lt '1:0.17.0~'; then
+        deb-systemd-helper --user purge app-io.github.westers.farside.server.service >/dev/null 2>&1 || true
     fi
-    deb-systemd-helper --user update-state app-io.github.westers.farside.server.service >/dev/null || true
 fi
 if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
     systemctl --system daemon-reload >/dev/null || true
